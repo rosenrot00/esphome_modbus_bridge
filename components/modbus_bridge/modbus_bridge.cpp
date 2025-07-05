@@ -131,7 +131,7 @@ void ModbusBridgeComponent::poll_uart_response_() {
     if (debug_) {
       std::string rx;
       for (auto b : response) rx += str_snprintf("%02X ", b);
-      ESP_LOGD(TAG, "RTU recv: %s", rx.c_str());
+      ESP_LOGD(TAG, "RTU recv (%d bytes): %s", response.size(), rx.c_str());
     }
 
     if (response.size() > 512) {
