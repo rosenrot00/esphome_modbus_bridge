@@ -155,11 +155,11 @@ void ModbusBridgeComponent::poll_uart_response_() {
 
     send(pending_request_.client_fd, tcp.data(), tcp.size(), 0);
     pending_request_.active = false;
-    pending_request_.response.clear();  // ✅ Fix 2: clear buffer after successful send
+    pending_request_.response.clear();
 
   } else if (millis() - pending_request_.start_time > 500) {
     ESP_LOGW(TAG, "Modbus timeout: no valid response received.");
-    pending_request_.response.clear();  // ✅ Fix 2: clear buffer after timeout
+    pending_request_.response.clear();
     pending_request_.active = false;
   } else {
     this->set_timeout("modbus_rx_poll", 5, [this]() { this->poll_uart_response_(); });
