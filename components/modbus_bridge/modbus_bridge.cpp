@@ -138,30 +138,42 @@ void ModbusBridgeComponent::poll_uart_response_() {
     pending_request_.no_data_counter = 0;
   }
 
-  if (++pending_request_.no_data_counter >= 2) {
-    if (debug_) log_hex("RTU->TCP", pending_request_.response);
-
-    send_response_tcp();
-    pending_request_.active = false;
-    cancel_interval("modbus_uart_poll");
+  if (pending_request_.response.empty()) {
+    pending_request_.no_data_counter++;
   }
 
-  if (millis() - pending_request_.start_time > 1000) {
-    ESP_LOGW(TAG, "Modbus timeout");
+  if (pending_request_.no_data_counter >= 2 || millis() - pending_request_.start_time > 1000) {
+    if (debug_) {
+      if (!pending_request_.response.empty())
+        log_hex("RTU->TCP", pending_request_.response);
+      else
+        ESP_LOGW(TAG, "No response received from RTU device.");
+    }
+
+    send_response_tcp();
     pending_request_.active = false;
     cancel_interval("modbus_uart_poll");
   }
 }
 
 void ModbusBridgeComponent::send_response_tcp() {
-  std::vector<uint8_t> &resp = pending_request_.response;
-  uint16_t pdulen = resp.size() - 3;
   std::vector<uint8_t> tcp_resp;
-  tcp_resp.insert(tcp_resp.end(), pending_request_.header, pending_request_.header + 4);
-  tcp_resp.push_back(0);
-  tcp_resp.push_back(pdulen + 1);
-  tcp_resp.push_back(resp[0]);
-  tcp_resp.insert(tcp_resp.end(), resp.begin() + 1, resp.end() - 2);
+
+  if (pending_request_.response.size() >= 5) {
+    uint16_t pdulen = pending_request_.response.size() - 3;
+    tcp_resp.insert(tcp_resp.end(), pending_request_.header, pending_request_.header + 4);
+    tcp_resp.push_back(0);
+    tcp_resp.push_back(pdulen + 1);
+    tcp_resp.push_back(pending_request_.response[0]);
+    tcp_resp.insert(tcp_resp.end(), pending_request_.response.begin() + 1, pending_request_.response.end() - 2);
+  } else {
+    tcp_resp.insert(tcp_resp.end(), pending_request_.header, pending_request_.header + 4);
+    tcp_resp.push_back(0);
+    tcp_resp.push_back(3);
+    tcp_resp.push_back(pending_request_.header[3]);
+    tcp_resp.push_back(pending_request_.header[2] | 0x80);
+    tcp_resp.push_back(0x0B);
+  }
 
   send(pending_request_.client_fd, tcp_resp.data(), tcp_resp.size(), 0);
 }
