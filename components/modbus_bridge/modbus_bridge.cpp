@@ -83,27 +83,28 @@ void ModbusBridgeComponent::loop() {
   bool processed_request = false;
   for (auto &c : this->clients_) {
     if (c.fd >= 0 && FD_ISSET(c.fd, &read_fds)) {
-      uint8_t header[7];
-      int r = recv(c.fd, header, 7, 0);
-      if (r <= 0) {
-        close(c.fd);
-        c.fd = -1;
+      constexpr size_t max_buffer = 256 + 6;  // UART RX buffer + header size
+      uint8_t buffer[max_buffer];
+      int r = recv(c.fd, buffer, sizeof(buffer), 0);
+      if (r < 7) {
+        if (r <= 0) {
+          close(c.fd);
+          c.fd = -1;
+        }
         continue;
       }
-      if (r < 7) continue;
 
-      uint16_t len = (header[4] << 8) | header[5];
-      uint8_t uid = header[6];
-      std::vector<uint8_t> pdu(len - 1);
-      if (recv(c.fd, pdu.data(), len - 1, 0) < 0) continue;
+      uint16_t len = (buffer[4] << 8) | buffer[5];
+      if (r < 6 + len) continue;  // not a complete message
 
+      uint8_t uid = buffer[6];
       std::vector<uint8_t> rtu;
       rtu.push_back(uid);
-      rtu.insert(rtu.end(), pdu.begin(), pdu.end());
+      rtu.insert(rtu.end(), buffer + 7, buffer + 6 + len);
       append_crc(rtu);
 
       if (debug_) {
-        ESP_LOGD(TAG, "TCP->RTU UID: %d, FC: 0x%02X, LEN: %d", uid, pdu[0], len);
+        ESP_LOGD(TAG, "TCP->RTU UID: %d, FC: 0x%02X, LEN: %d", uid, rtu[1], len);
         char buf[rtu.size() * 3 + 1];
         char *ptr = buf;
         for (auto b : rtu) ptr += sprintf(ptr, "%02X ", b);
@@ -115,7 +116,7 @@ void ModbusBridgeComponent::loop() {
       this->uart_->flush();
 
       pending_request_.client_fd = c.fd;
-      memcpy(pending_request_.header, header, 7);
+      memcpy(pending_request_.header, buffer, 7);
       pending_request_.response.clear();
       pending_request_.active = true;
       pending_request_.start_time = millis();
