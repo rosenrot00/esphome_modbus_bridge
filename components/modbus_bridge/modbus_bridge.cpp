@@ -1,4 +1,3 @@
-// modbus_bridge.cpp – optimized with 2× no new UART bytes = complete frame
 #include "modbus_bridge.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
@@ -32,8 +31,17 @@ void ModbusBridgeComponent::initialize_tcp_server_() {
   server_addr.sin_port = htons(this->tcp_port_);
   server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-  bind(this->sock_, (struct sockaddr *)&server_addr, sizeof(server_addr));
-  listen(this->sock_, 4);
+  if (bind(this->sock_, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+    ESP_LOGE(TAG, "Socket bind failed");
+    close(this->sock_);
+    return;
+  }
+
+  if (listen(this->sock_, 4) < 0) {
+    ESP_LOGE(TAG, "Socket listen failed");
+    close(this->sock_);
+    return;
+  }
 
   ESP_LOGI(TAG, "Listening on port %d", this->tcp_port_);
 
@@ -52,148 +60,116 @@ void ModbusBridgeComponent::loop() {
   for (auto &c : this->clients_) {
     if (c.fd >= 0) {
       FD_SET(c.fd, &read_fds);
-      if (c.fd > maxfd) maxfd = c.fd;
+      maxfd = std::max(maxfd, c.fd);
     }
   }
 
-  struct timeval timeout = {0, 0};
-  int sel = select(maxfd + 1, &read_fds, NULL, NULL, &timeout);
+  struct timeval timeout = {0, 10000}; // 10ms
+  int sel = select(maxfd + 1, &read_fds, nullptr, nullptr, &timeout);
   if (sel < 0) return;
 
   if (FD_ISSET(this->sock_, &read_fds)) {
-    int newfd = accept(this->sock_, NULL, NULL);
+    int newfd = accept(this->sock_, nullptr, nullptr);
     if (newfd >= 0) {
       fcntl(newfd, F_SETFL, O_NONBLOCK);
+      bool assigned = false;
       for (auto &c : this->clients_) {
         if (c.fd < 0) {
           c.fd = newfd;
           ESP_LOGD(TAG, "Client connected: %d", newfd);
+          assigned = true;
           break;
         }
+      }
+      if (!assigned) {
+        ESP_LOGW(TAG, "Max clients reached, rejecting new client");
+        close(newfd);
       }
     }
   }
 
   for (auto &c : this->clients_) {
     if (c.fd >= 0 && FD_ISSET(c.fd, &read_fds)) {
-      uint8_t header[7];
-      int r = recv(c.fd, header, 7, 0);
+      const size_t buffer_size = uart_->get_rx_buffer_size() + 6;
+      std::vector<uint8_t> tcp_buffer(buffer_size);
+      int r = recv(c.fd, tcp_buffer.data(), tcp_buffer.size(), 0);
       if (r <= 0) {
+        ESP_LOGD(TAG, "Client disconnected: %d", c.fd);
         close(c.fd);
         c.fd = -1;
         continue;
       }
-      if (r < 7) continue;
+      if (r < 8) continue;
 
-      uint16_t len = (header[4] << 8) | header[5];
-      uint8_t uid = header[6];
-      std::vector<uint8_t> pdu(len - 1);
-      if (recv(c.fd, pdu.data(), len - 1, 0) < 0) continue;
+      uint16_t len = (tcp_buffer[4] << 8) | tcp_buffer[5];
+      if (r < len + 6) continue;
 
-      std::vector<uint8_t> rtu;
-      rtu.push_back(uid);
-      rtu.insert(rtu.end(), pdu.begin(), pdu.end());
+      std::vector<uint8_t> rtu(tcp_buffer.begin() + 6, tcp_buffer.begin() + 6 + len);
       append_crc(rtu);
 
-      if (debug_) {
-        ESP_LOGD(TAG, "TCP->RTU UID: %d, FC: 0x%02X, LEN: %d", uid, pdu[0], len);
-        char buf[rtu.size() * 3 + 1];
-        char *ptr = buf;
-        for (auto b : rtu) ptr += sprintf(ptr, "%02X ", b);
-        *ptr = '\0';
-        ESP_LOGD(TAG, "RTU send: %s", buf);
-      }
+      if (debug_) log_hex("TCP->RTU", rtu);
 
-      this->uart_->write_array(rtu);
-      this->uart_->flush();
+      uart_->write_array(rtu);
+      uart_->flush();
 
-      pending_request_.client_fd = c.fd;
-      memcpy(pending_request_.header, header, 7);
-      pending_request_.response.clear();
-      pending_request_.active = true;
-      pending_request_.start_time = millis();
-      pending_request_.last_size = 0;
-      pending_request_.no_data_counter = 0;
+      pending_request_ = {true, c.fd, {tcp_buffer[0], tcp_buffer[1], tcp_buffer[2], tcp_buffer[3]}, millis(), 0, 0, {}};
 
-      this->set_timeout("modbus_rx_poll", 10, [this]() { this->poll_uart_response_(); });
+      this->set_interval("modbus_uart_poll", 5, [this]() { poll_uart_response_(); });
       break;
     }
   }
 }
 
 void ModbusBridgeComponent::poll_uart_response_() {
-  if (!pending_request_.active) return;
-
-  while (this->uart_->available()) {
+  while (uart_->available()) {
     uint8_t b;
-    this->uart_->read_byte(&b);
+    uart_->read_byte(&b);
     pending_request_.response.push_back(b);
-  }
-
-  size_t new_size = pending_request_.response.size();
-  if (new_size == pending_request_.last_size) {
-    pending_request_.no_data_counter++;
-  } else {
     pending_request_.no_data_counter = 0;
-    pending_request_.last_size = new_size;
   }
 
-  if (pending_request_.no_data_counter >= 2) {
-    if (debug_) {
-      char buf[new_size * 3 + 1];
-      char *ptr = buf;
-      for (auto b : pending_request_.response) ptr += sprintf(ptr, "%02X ", b);
-      *ptr = '\0';
-      ESP_LOGD(TAG, "RTU recv (%d bytes): %s", (int)new_size, buf);
-    }
+  if (++pending_request_.no_data_counter >= 2) {
+    if (debug_) log_hex("RTU->TCP", pending_request_.response);
 
-    std::vector<uint8_t> &response = pending_request_.response;
-    std::vector<uint8_t> tcp;
-    uint16_t pdulen = response.size() - 3;
-    tcp.insert(tcp.end(), pending_request_.header, pending_request_.header + 4);
-    tcp.push_back(0);
-    tcp.push_back(pdulen + 1);
-    tcp.push_back(response[0]);
-    tcp.insert(tcp.end(), response.begin() + 1, response.end() - 2);
-
-    if (debug_) {
-      char tbuf[tcp.size() * 3 + 1];
-      char *tptr = tbuf;
-      for (auto b : tcp) tptr += sprintf(tptr, "%02X ", b);
-      *tptr = '\0';
-      ESP_LOGD(TAG, "RTU->TCP response: %s", tbuf);
-      ESP_LOGD(TAG, "Response time: %ums", millis() - pending_request_.start_time);
-    }
-
-    send(pending_request_.client_fd, tcp.data(), tcp.size(), 0);
+    send_response_tcp();
     pending_request_.active = false;
-    return;
+    cancel_interval("modbus_uart_poll");
   }
 
   if (millis() - pending_request_.start_time > 1000) {
-    ESP_LOGW(TAG, "Modbus timeout: no valid response received.");
-    pending_request_.response.clear();
+    ESP_LOGW(TAG, "Modbus timeout");
     pending_request_.active = false;
-    return;
+    cancel_interval("modbus_uart_poll");
   }
-
-  this->set_timeout("modbus_rx_poll", 10, [this]() { this->poll_uart_response_(); });
 }
 
-void ModbusBridgeComponent::update() {}
+void ModbusBridgeComponent::send_response_tcp() {
+  std::vector<uint8_t> &resp = pending_request_.response;
+  uint16_t pdulen = resp.size() - 3;
+  std::vector<uint8_t> tcp_resp;
+  tcp_resp.insert(tcp_resp.end(), pending_request_.header, pending_request_.header + 4);
+  tcp_resp.push_back(0);
+  tcp_resp.push_back(pdulen + 1);
+  tcp_resp.push_back(resp[0]);
+  tcp_resp.insert(tcp_resp.end(), resp.begin() + 1, resp.end() - 2);
+
+  send(pending_request_.client_fd, tcp_resp.data(), tcp_resp.size(), 0);
+}
+
+void ModbusBridgeComponent::log_hex(const char *prefix, const std::vector<uint8_t> &data) {
+  char buf[data.size() * 3 + 1];
+  char *ptr = buf;
+  for (auto b : data) ptr += sprintf(ptr, "%02X ", b);
+  *ptr = '\0';
+  ESP_LOGD(TAG, "%s: %s", prefix, buf);
+}
 
 void ModbusBridgeComponent::append_crc(std::vector<uint8_t> &data) {
   uint16_t crc = 0xFFFF;
   for (uint8_t b : data) {
     crc ^= b;
-    for (int i = 0; i < 8; i++) {
-      if (crc & 1) {
-        crc >>= 1;
-        crc ^= 0xA001;
-      } else {
-        crc >>= 1;
-      }
-    }
+    for (int i = 0; i < 8; i++)
+      crc = crc & 1 ? (crc >> 1) ^ 0xA001 : crc >> 1;
   }
   data.push_back(crc & 0xFF);
   data.push_back((crc >> 8) & 0xFF);
