@@ -3,27 +3,19 @@
 #include "esphome.h"
 #include "esphome/components/uart/uart.h"
 #include <vector>
+#include <lwip/sockets.h>
 
 namespace esphome {
 namespace modbus_bridge {
 
 struct PendingRequest {
-  bool active;
-  int client_fd;
-  uint8_t header[4];
-  uint32_t start_time;
-  size_t last_size;
-  int no_data_counter;
-  std::vector<uint8_t> response;
-
-  PendingRequest()
-      : active(false),
-        client_fd(-1),
-        header{0},
-        start_time(0),
-        last_size(0),
-        no_data_counter(0),
-        response{} {}
+  bool active{false};
+  int client_fd{-1};
+  uint8_t header[4]{0};
+  uint32_t start_time{0};
+  size_t last_size{0};
+  int no_data_counter{0};
+  std::vector<uint8_t> response{};
 };
 
 class ModbusBridgeComponent : public PollingComponent {
@@ -32,7 +24,7 @@ class ModbusBridgeComponent : public PollingComponent {
 
   void setup() override;
   void loop() override;
-  void update() override;
+  void update() override {}
 
   void set_uart(uart::UARTComponent *uart) { uart_ = uart; }
   void set_tcp_port(uint16_t port) { tcp_port_ = port; }
@@ -51,7 +43,7 @@ class ModbusBridgeComponent : public PollingComponent {
   bool debug_{false};
 
   PendingRequest pending_request_;
-  
+
   struct Client {
     int fd{-1};
   };
