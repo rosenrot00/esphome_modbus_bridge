@@ -1,51 +1,60 @@
-// modbus_bridge.h – updated for timing support and long response detection
 #pragma once
-#include "esphome/core/component.h"
-#include "esphome/components/uart/uart.h"
+
+#include "esphome.h"
 #include <vector>
 
 namespace esphome {
 namespace modbus_bridge {
 
-struct TCPClient {
-  int fd = -1;
-};
-
 struct PendingRequest {
+  bool active;
   int client_fd;
-  uint8_t header[7];
+  uint8_t header[4];
+  uint32_t start_time;
+  size_t last_size;
+  int no_data_counter;
   std::vector<uint8_t> response;
-  bool active = false;
-  uint32_t start_time = 0;
 
-  // Fields used to detect end of frame after 2 consecutive polls with no new UART data
-  size_t last_size = 0;
-  int no_data_counter = 0;
+  PendingRequest()
+      : active(false),
+        client_fd(-1),
+        header{0},
+        start_time(0),
+        last_size(0),
+        no_data_counter(0),
+        response{} {}
 };
 
 class ModbusBridgeComponent : public PollingComponent {
  public:
   ModbusBridgeComponent();
 
-  void set_uart_id(uart::UARTComponent *uart) { uart_ = uart; }
-  void set_tcp_port(uint16_t port) { tcp_port_ = port; }
-  void set_debug(bool debug) { debug_ = debug; }
-
   void setup() override;
   void loop() override;
   void update() override;
 
+  void set_uart(uart::UARTComponent *uart) { uart_ = uart; }
+  void set_tcp_port(uint16_t port) { tcp_port_ = port; }
+  void set_debug(bool debug) { debug_ = debug; }
+
  protected:
-  uart::UARTComponent *uart_;
+  void initialize_tcp_server_();
+  void poll_uart_response_();
+  void send_response_tcp();
+  void log_hex(const char *prefix, const std::vector<uint8_t> &data);
+  void append_crc(std::vector<uint8_t> &data);
+
+  uart::UARTComponent *uart_{nullptr};
   int sock_{-1};
-  TCPClient clients_[4];
-  PendingRequest pending_request_;
   uint16_t tcp_port_{502};
   bool debug_{false};
 
-  void append_crc(std::vector<uint8_t> &data);
-  void initialize_tcp_server_();
-  void poll_uart_response_();
+  PendingRequest pending_request_;
+  
+  struct Client {
+    int fd{-1};
+  };
+  Client clients_[4];
 };
 
 }  // namespace modbus_bridge
