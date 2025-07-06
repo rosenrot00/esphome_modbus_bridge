@@ -115,7 +115,7 @@ void ModbusBridgeComponent::loop() {
       pending_request_.last_size = 0;
       pending_request_.no_data_counter = 0;
 
-      this->set_timeout("modbus_rx_poll", 5, [this]() { this->poll_uart_response_(); });
+      this->set_timeout("modbus_rx_poll", 10, [this]() { this->poll_uart_response_(); });
       break;
     }
   }
@@ -177,7 +177,7 @@ void ModbusBridgeComponent::poll_uart_response_() {
     return;
   }
 
-  this->set_timeout("modbus_rx_poll", 5, [this]() { this->poll_uart_response_(); });
+  this->set_timeout("modbus_rx_poll", 10, [this]() { this->poll_uart_response_(); });
 }
 
 void ModbusBridgeComponent::update() {}
