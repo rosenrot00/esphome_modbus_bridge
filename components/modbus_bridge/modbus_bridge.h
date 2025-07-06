@@ -1,4 +1,4 @@
-// modbus_bridge.h – updated for timing support and long response warning
+// modbus_bridge.h – updated for timing support and long response detection
 #pragma once
 #include "esphome/core/component.h"
 #include "esphome/components/uart/uart.h"
@@ -17,6 +17,10 @@ struct PendingRequest {
   std::vector<uint8_t> response;
   bool active = false;
   uint32_t start_time = 0;
+
+  // Fields used to detect end of frame after 2 consecutive polls with no new UART data
+  size_t last_size = 0;
+  int no_data_counter = 0;
 };
 
 class ModbusBridgeComponent : public PollingComponent {
