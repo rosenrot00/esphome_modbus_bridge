@@ -42,7 +42,10 @@ void ModbusBridgeComponent::initialize_tcp_server_() {
 }
 
 void ModbusBridgeComponent::loop() {
-  if (this->sock_ < 0 || pending_request_.active) return;
+  if (this->sock_ < 0 || pending_request_.active) {
+    esphome::delay(5);
+    return;
+  }
 
   fd_set read_fds;
   FD_ZERO(&read_fds);
@@ -58,7 +61,10 @@ void ModbusBridgeComponent::loop() {
 
   struct timeval timeout = {0, 0};
   int sel = select(maxfd + 1, &read_fds, NULL, NULL, &timeout);
-  if (sel < 0) return;
+  if (sel < 0) {
+    esphome::delay(5);
+    return;
+  }
 
   if (FD_ISSET(this->sock_, &read_fds)) {
     int newfd = accept(this->sock_, NULL, NULL);
@@ -74,6 +80,7 @@ void ModbusBridgeComponent::loop() {
     }
   }
 
+  bool processed_request = false;
   for (auto &c : this->clients_) {
     if (c.fd >= 0 && FD_ISSET(c.fd, &read_fds)) {
       uint8_t header[7];
@@ -100,7 +107,7 @@ void ModbusBridgeComponent::loop() {
         char buf[rtu.size() * 3 + 1];
         char *ptr = buf;
         for (auto b : rtu) ptr += sprintf(ptr, "%02X ", b);
-        *ptr = '\0';
+        *ptr = 0;
         ESP_LOGD(TAG, "RTU send: %s", buf);
       }
 
@@ -116,8 +123,13 @@ void ModbusBridgeComponent::loop() {
       pending_request_.no_data_counter = 0;
 
       this->set_timeout("modbus_rx_poll", 10, [this]() { this->poll_uart_response_(); });
+      processed_request = true;
       break;
     }
+  }
+
+  if (!processed_request) {
+    esphome::delay(5); // 5 ms delay only if no request is processed
   }
 }
 
@@ -143,7 +155,7 @@ void ModbusBridgeComponent::poll_uart_response_() {
       char buf[new_size * 3 + 1];
       char *ptr = buf;
       for (auto b : pending_request_.response) ptr += sprintf(ptr, "%02X ", b);
-      *ptr = '\0';
+      *ptr = 0;
       ESP_LOGD(TAG, "RTU recv (%d bytes): %s", (int)new_size, buf);
     }
 
@@ -160,7 +172,7 @@ void ModbusBridgeComponent::poll_uart_response_() {
       char tbuf[tcp.size() * 3 + 1];
       char *tptr = tbuf;
       for (auto b : tcp) tptr += sprintf(tptr, "%02X ", b);
-      *tptr = '\0';
+      *tptr = 0;
       ESP_LOGD(TAG, "RTU->TCP response: %s", tbuf);
       ESP_LOGD(TAG, "Response time: %ums", millis() - pending_request_.start_time);
     }
