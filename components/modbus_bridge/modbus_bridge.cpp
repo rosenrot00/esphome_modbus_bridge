@@ -1,4 +1,5 @@
-// modbus_bridge.cpp – with response time logging, timeout, and improved buffer handling
+// modbus_bridge.cpp – with improved logging (clean byte dump + register dump)
+
 #include "modbus_bridge.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
@@ -97,9 +98,12 @@ void ModbusBridgeComponent::loop() {
 
       if (debug_) {
         ESP_LOGD(TAG, "TCP->RTU UID: %d, FC: 0x%02X, LEN: %d", uid, pdu[0], len);
-        std::string hex;
-        for (auto b : rtu) hex += str_snprintf("%02X ", b);
-        ESP_LOGD(TAG, "RTU send: %s", hex.c_str());
+
+        char buf[rtu.size() * 3 + 1];
+        char *ptr = buf;
+        for (auto b : rtu) ptr += sprintf(ptr, "%02X ", b);
+        *ptr = '\0';
+        ESP_LOGD(TAG, "RTU send: %s", buf);
       }
 
       this->uart_->write_array(rtu);
@@ -129,9 +133,26 @@ void ModbusBridgeComponent::poll_uart_response_() {
     std::vector<uint8_t> &response = pending_request_.response;
 
     if (debug_) {
-      std::string rx;
-      for (auto b : response) rx += str_snprintf("%02X ", b);
-      ESP_LOGD(TAG, "RTU recv (%d bytes): %s", response.size(), rx.c_str());
+      char buf[response.size() * 3 + 1];
+      char *ptr = buf;
+      for (auto b : response) ptr += sprintf(ptr, "%02X ", b);
+      *ptr = '\0';
+      ESP_LOGD(TAG, "RTU recv (%d bytes): %s", response.size(), buf);
+
+      // Wenn gültige Registerantwort (FC 0x03), versuche als Registerwerte darzustellen
+      if (response[1] == 0x03 && response.size() >= 5) {
+        uint8_t byte_count = response[2];
+        std::string reg_dump;
+        for (int i = 0; i < byte_count; i += 2) {
+          if (3 + i + 1 < response.size()) {
+            uint16_t reg = (response[3 + i] << 8) | response[3 + i + 1];
+            char rbuf[8];
+            sprintf(rbuf, "%04X ", reg);
+            reg_dump += rbuf;
+          }
+        }
+        ESP_LOGD(TAG, "Register values (hex): %s", reg_dump.c_str());
+      }
     }
 
     if (response.size() > 512) {
@@ -147,9 +168,11 @@ void ModbusBridgeComponent::poll_uart_response_() {
     tcp.insert(tcp.end(), response.begin() + 1, response.end() - 2);
 
     if (debug_) {
-      std::string tx;
-      for (auto b : tcp) tx += str_snprintf("%02X ", b);
-      ESP_LOGD(TAG, "RTU->TCP response: %s", tx.c_str());
+      char tbuf[tcp.size() * 3 + 1];
+      char *tptr = tbuf;
+      for (auto b : tcp) tptr += sprintf(tptr, "%02X ", b);
+      *tptr = '\0';
+      ESP_LOGD(TAG, "RTU->TCP response: %s", tbuf);
       ESP_LOGD(TAG, "Response time: %ums", millis() - pending_request_.start_time);
     }
 
