@@ -58,3 +58,6 @@ modbus_bridge:
   tcp_port: 502
   debug: true
 ```
+## Compatibility
+
+This bridge has been tested successfully with the [homeassistant-solax-modbus](https://github.com/wills106/homeassistant-solax-modbus) integration.
