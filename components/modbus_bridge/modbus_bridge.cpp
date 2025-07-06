@@ -2,6 +2,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 #include <lwip/sockets.h>
+#include <lwip/netdb.h>
 #include <fcntl.h>
 
 namespace esphome {
@@ -18,7 +19,7 @@ void ModbusBridgeComponent::setup() {
 }
 
 void ModbusBridgeComponent::initialize_tcp_server_() {
-  this->sock_ = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+  this->sock_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
   if (this->sock_ < 0) {
     ESP_LOGE(TAG, "Socket creation failed");
     return;
@@ -26,18 +27,18 @@ void ModbusBridgeComponent::initialize_tcp_server_() {
 
   fcntl(this->sock_, F_SETFL, O_NONBLOCK);
 
-  struct sockaddr_in server_addr = {};
+  sockaddr_in server_addr{};
   server_addr.sin_family = AF_INET;
   server_addr.sin_port = htons(this->tcp_port_);
   server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-  if (bind(this->sock_, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+  if (::bind(this->sock_, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
     ESP_LOGE(TAG, "Socket bind failed");
     close(this->sock_);
     return;
   }
 
-  if (listen(this->sock_, 4) < 0) {
+  if (::listen(this->sock_, 4) < 0) {
     ESP_LOGE(TAG, "Socket listen failed");
     close(this->sock_);
     return;
@@ -64,7 +65,7 @@ void ModbusBridgeComponent::loop() {
     }
   }
 
-  struct timeval timeout = {0, 10000}; // 10ms
+  timeval timeout{0, 10000};
   int sel = select(maxfd + 1, &read_fds, nullptr, nullptr, &timeout);
   if (sel < 0) return;
 
@@ -90,7 +91,7 @@ void ModbusBridgeComponent::loop() {
 
   for (auto &c : this->clients_) {
     if (c.fd >= 0 && FD_ISSET(c.fd, &read_fds)) {
-      const size_t buffer_size = uart_->get_rx_buffer_size() + 6;
+      size_t buffer_size = uart_->get_rx_buffer_size() + 6;
       std::vector<uint8_t> tcp_buffer(buffer_size);
       int r = recv(c.fd, tcp_buffer.data(), tcp_buffer.size(), 0);
       if (r <= 0) {
@@ -112,7 +113,16 @@ void ModbusBridgeComponent::loop() {
       uart_->write_array(rtu);
       uart_->flush();
 
-      pending_request_ = {true, c.fd, {tcp_buffer[0], tcp_buffer[1], tcp_buffer[2], tcp_buffer[3]}, millis(), 0, 0, {}};
+      pending_request_.active = true;
+      pending_request_.client_fd = c.fd;
+      pending_request_.header[0] = tcp_buffer[0];
+      pending_request_.header[1] = tcp_buffer[1];
+      pending_request_.header[2] = tcp_buffer[2];
+      pending_request_.header[3] = tcp_buffer[3];
+      pending_request_.start_time = millis();
+      pending_request_.last_size = 0;
+      pending_request_.no_data_counter = 0;
+      pending_request_.response.clear();
 
       this->set_interval("modbus_uart_poll", 5, [this]() { poll_uart_response_(); });
       break;
