@@ -1,4 +1,4 @@
-// modbus_bridge.cpp – optimiert für lange Modbus-Antworten (z.B. viele Register)
+// modbus_bridge.cpp – reaktiv auf UART-Stille statt ByteCount
 #include "modbus_bridge.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
@@ -97,11 +97,9 @@ void ModbusBridgeComponent::loop() {
 
       if (debug_) {
         ESP_LOGD(TAG, "TCP->RTU UID: %d, FC: 0x%02X, LEN: %d", uid, pdu[0], len);
-        char buf[rtu.size() * 3 + 1];
-        char *ptr = buf;
-        for (auto b : rtu) ptr += sprintf(ptr, "%02X ", b);
-        *ptr = '\0';
-        ESP_LOGD(TAG, "RTU send: %s", buf);
+        std::string hex;
+        for (auto b : rtu) hex += str_snprintf("%02X ", b);
+        ESP_LOGD(TAG, "RTU send: %s", hex.c_str());
       }
 
       this->uart_->write_array(rtu);
@@ -112,7 +110,12 @@ void ModbusBridgeComponent::loop() {
       pending_request_.response.clear();
       pending_request_.active = true;
       pending_request_.start_time = millis();
-      this->set_timeout("modbus_rx_poll", 10, [this]() { this->poll_uart_response_(); });
+      pending_request_.no_data_counter = 0;
+      pending_request_.last_size = 0;
+
+      this->set_timeout("modbus_rx_poll", 5, [this]() {
+        this->poll_uart_response_();
+      });
       break;
     }
   }
@@ -127,41 +130,21 @@ void ModbusBridgeComponent::poll_uart_response_() {
     pending_request_.response.push_back(b);
   }
 
-  std::vector<uint8_t> &response = pending_request_.response;
-
-  bool has_min_header = response.size() >= 5;
-  bool has_full_data = false;
-
-  if (has_min_header) {
-    uint8_t byte_count = response[2];  // data length in bytes
-    size_t expected = 3 + byte_count + 2;  // 3 header + data + 2 CRC
-    if (response.size() >= expected) {
-      has_full_data = true;
-    }
+  size_t current_size = pending_request_.response.size();
+  if (current_size == pending_request_.last_size) {
+    pending_request_.no_data_counter++;
+  } else {
+    pending_request_.no_data_counter = 0;
+    pending_request_.last_size = current_size;
   }
 
-  if (has_full_data) {
-    if (debug_) {
-      char buf[response.size() * 3 + 1];
-      char *ptr = buf;
-      for (auto b : response) ptr += sprintf(ptr, "%02X ", b);
-      *ptr = '\0';
-      ESP_LOGD(TAG, "RTU recv (%d bytes): %s", (int)response.size(), buf);
+  if (pending_request_.no_data_counter >= 2) {
+    std::vector<uint8_t> &response = pending_request_.response;
 
-      // Optional: Register dump for FC 0x03
-      if (response[1] == 0x03) {
-        uint8_t bc = response[2];
-        std::string reg_dump;
-        for (int i = 0; i < bc; i += 2) {
-          if (3 + i + 1 < response.size()) {
-            uint16_t val = (response[3 + i] << 8) | response[3 + i + 1];
-            char rbuf[8];
-            sprintf(rbuf, "%04X ", val);
-            reg_dump += rbuf;
-          }
-        }
-        ESP_LOGD(TAG, "Register values (hex): %s", reg_dump.c_str());
-      }
+    if (debug_) {
+      std::string rx;
+      for (auto b : response) rx += str_snprintf("%02X ", b);
+      ESP_LOGD(TAG, "RTU recv (%d bytes): %s", response.size(), rx.c_str());
     }
 
     std::vector<uint8_t> tcp;
@@ -173,25 +156,26 @@ void ModbusBridgeComponent::poll_uart_response_() {
     tcp.insert(tcp.end(), response.begin() + 1, response.end() - 2);
 
     if (debug_) {
-      char tbuf[tcp.size() * 3 + 1];
-      char *tptr = tbuf;
-      for (auto b : tcp) tptr += sprintf(tptr, "%02X ", b);
-      *tptr = '\0';
-      ESP_LOGD(TAG, "RTU->TCP response: %s", tbuf);
+      std::string tx;
+      for (auto b : tcp) tx += str_snprintf("%02X ", b);
+      ESP_LOGD(TAG, "RTU->TCP response: %s", tx.c_str());
       ESP_LOGD(TAG, "Response time: %ums", millis() - pending_request_.start_time);
     }
 
     send(pending_request_.client_fd, tcp.data(), tcp.size(), 0);
     pending_request_.active = false;
-    response.clear();
-
-  } else if (millis() - pending_request_.start_time > 1000) {
-    ESP_LOGW(TAG, "Modbus timeout: no valid response received.");
-    pending_request_.response.clear();
-    pending_request_.active = false;
-  } else {
-    this->set_timeout("modbus_rx_poll", 10, [this]() { this->poll_uart_response_(); });
+    return;
   }
+
+  if (millis() - pending_request_.start_time > 1000) {
+    ESP_LOGW(TAG, "Modbus timeout: no valid response received.");
+    pending_request_.active = false;
+    return;
+  }
+
+  this->set_timeout("modbus_rx_poll", 5, [this]() {
+    this->poll_uart_response_();
+  });
 }
 
 void ModbusBridgeComponent::update() {}
