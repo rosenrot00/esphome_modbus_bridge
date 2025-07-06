@@ -124,7 +124,7 @@ void ModbusBridgeComponent::loop() {
       pending_request_.no_data_counter = 0;
       pending_request_.response.clear();
 
-      this->set_interval("modbus_uart_poll", 5, [this]() { poll_uart_response_(); });
+      this->set_interval("modbus_uart_poll", 10, [this]() { poll_uart_response_(); });
       break;
     }
   }
