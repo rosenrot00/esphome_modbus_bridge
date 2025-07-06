@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esphome.h"
+#include "esphome/components/uart/uart.h"
 #include <vector>
 
 namespace esphome {
