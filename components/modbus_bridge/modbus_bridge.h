@@ -1,4 +1,3 @@
-// modbus_bridge.h – with configurable poll interval
 #pragma once
 #include "esphome/core/component.h"
 #include "esphome/components/uart/uart.h"
@@ -34,18 +33,18 @@ class ModbusBridgeComponent : public Component {
   void update() override {}
 
  protected:
-  uart::UARTComponent *uart_{};              // UART instance
-  int sock_{-1};                             // TCP server socket
-  TCPClient clients_[4];                    // Max 4 clients
-  PendingRequest pending_request_;          // One request at a time
-  uint16_t tcp_port_{502};                  // Default Modbus TCP port
-  bool debug_{false};                       // Optional debug output
-  uint32_t tcp_poll_interval_ms_{10};       // Configurable polling interval
+  uart::UARTComponent *uart_{nullptr};
+  int sock_{-1};
+  TCPClient clients_[4];
+  PendingRequest pending_request_;
+  uint16_t tcp_port_{502};
+  bool debug_{false};
+  uint32_t tcp_poll_interval_ms_{10};
 
-  void initialize_tcp_server_();            // Setup socket
-  void poll_uart_response_();               // Handle UART response
-  void append_crc(std::vector<uint8_t> &data); // CRC-16 calculation
-  void check_tcp_sockets_();                // Poll TCP clients for data
+  void append_crc(std::vector<uint8_t> &data);
+  void initialize_tcp_server_();
+  void poll_uart_response_();
+  void check_tcp_sockets_();
 };
 
 }  // namespace modbus_bridge
