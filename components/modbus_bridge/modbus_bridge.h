@@ -30,7 +30,6 @@ class ModbusBridgeComponent : public Component {
   void set_tcp_poll_interval(uint32_t interval_ms) { tcp_poll_interval_ms_ = interval_ms; }
 
   void setup() override;
-  void update() override {}
 
  protected:
   uart::UARTComponent *uart_{nullptr};
