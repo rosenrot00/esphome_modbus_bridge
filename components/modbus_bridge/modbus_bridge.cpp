@@ -62,7 +62,7 @@ void ModbusBridgeComponent::loop() {
   struct timeval timeout = {0, 0};
   int sel = select(maxfd + 1, &read_fds, NULL, NULL, &timeout);
   if (sel < 0) {
-    esphome::delay(5);
+    //esphome::delay(5);
     return;
   }
 
@@ -129,9 +129,9 @@ void ModbusBridgeComponent::loop() {
     }
   }
 
-  if (!processed_request) {
-    esphome::delay(5); // 5 ms delay only if no request is processed
-  }
+  //if (!processed_request) {
+  //  esphome::delay(5); // 5 ms delay only if no request is processed
+  //}
 }
 
 void ModbusBridgeComponent::poll_uart_response_() {
