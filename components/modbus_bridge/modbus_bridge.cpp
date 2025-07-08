@@ -1,4 +1,4 @@
-// modbus_bridge.cpp – optimized with 2× no new UART bytes = complete frame
+// modbus_bridge.cpp – event-based, configurable TCP poll interval
 #include "modbus_bridge.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
@@ -15,6 +15,10 @@ ModbusBridgeComponent::ModbusBridgeComponent() {}
 void ModbusBridgeComponent::setup() {
   this->set_timeout("modbus_bridge_setup", 5000, [this]() {
     this->initialize_tcp_server_();
+  });
+
+  this->set_interval("tcp_poll", this->tcp_poll_interval_ms_, [this]() {
+    this->check_tcp_sockets_();
   });
 }
 
@@ -41,11 +45,8 @@ void ModbusBridgeComponent::initialize_tcp_server_() {
   pending_request_.active = false;
 }
 
-void ModbusBridgeComponent::loop() {
-  if (this->sock_ < 0 || pending_request_.active) {
-    esphome::delay(5);
-    return;
-  }
+void ModbusBridgeComponent::check_tcp_sockets_() {
+  if (this->sock_ < 0 || pending_request_.active) return;
 
   fd_set read_fds;
   FD_ZERO(&read_fds);
@@ -61,10 +62,7 @@ void ModbusBridgeComponent::loop() {
 
   struct timeval timeout = {0, 0};
   int sel = select(maxfd + 1, &read_fds, NULL, NULL, &timeout);
-  if (sel < 0) {
-    //esphome::delay(5);
-    return;
-  }
+  if (sel < 0) return;
 
   if (FD_ISSET(this->sock_, &read_fds)) {
     int newfd = accept(this->sock_, NULL, NULL);
@@ -80,10 +78,9 @@ void ModbusBridgeComponent::loop() {
     }
   }
 
-  bool processed_request = false;
   for (auto &c : this->clients_) {
     if (c.fd >= 0 && FD_ISSET(c.fd, &read_fds)) {
-      constexpr size_t max_buffer = 256 + 6;  // UART RX buffer + header size
+      constexpr size_t max_buffer = 256 + 6;
       uint8_t buffer[max_buffer];
       int r = recv(c.fd, buffer, sizeof(buffer), 0);
       if (r < 7) {
@@ -95,7 +92,7 @@ void ModbusBridgeComponent::loop() {
       }
 
       uint16_t len = (buffer[4] << 8) | buffer[5];
-      if (r < 6 + len) continue;  // not a complete message
+      if (r < 6 + len) continue;
 
       uint8_t uid = buffer[6];
       std::vector<uint8_t> rtu;
@@ -113,8 +110,6 @@ void ModbusBridgeComponent::loop() {
       }
 
       this->uart_->write_array(rtu);
-      this->uart_->flush();
-
       pending_request_.client_fd = c.fd;
       memcpy(pending_request_.header, buffer, 7);
       pending_request_.response.clear();
@@ -124,14 +119,9 @@ void ModbusBridgeComponent::loop() {
       pending_request_.no_data_counter = 0;
 
       this->set_timeout("modbus_rx_poll", 10, [this]() { this->poll_uart_response_(); });
-      processed_request = true;
       break;
     }
   }
-
-  //if (!processed_request) {
-  //  esphome::delay(5); // 5 ms delay only if no request is processed
-  //}
 }
 
 void ModbusBridgeComponent::poll_uart_response_() {
@@ -192,8 +182,6 @@ void ModbusBridgeComponent::poll_uart_response_() {
 
   this->set_timeout("modbus_rx_poll", 10, [this]() { this->poll_uart_response_(); });
 }
-
-void ModbusBridgeComponent::update() {}
 
 void ModbusBridgeComponent::append_crc(std::vector<uint8_t> &data) {
   uint16_t crc = 0xFFFF;
