@@ -1,4 +1,3 @@
-// modbus_bridge.cpp – event-based, configurable TCP poll interval
 #include "modbus_bridge.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
@@ -20,6 +19,8 @@ void ModbusBridgeComponent::setup() {
   this->set_interval("tcp_poll", this->tcp_poll_interval_ms_, [this]() {
     this->check_tcp_sockets_();
   });
+
+  this->polling_active_ = false;  // neue Initialisierung
 }
 
 void ModbusBridgeComponent::initialize_tcp_server_() {
@@ -118,10 +119,23 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       pending_request_.last_size = 0;
       pending_request_.no_data_counter = 0;
 
-      this->set_timeout("modbus_rx_poll", 10, [this]() { this->poll_uart_response_(); });
+      this->start_uart_polling_();
       break;
     }
   }
+}
+
+void ModbusBridgeComponent::start_uart_polling_() {
+  if (this->polling_active_) return;
+  this->polling_active_ = true;
+
+  this->set_interval("modbus_rx_poll", 10, [this]() {
+    this->poll_uart_response_();
+    if (!this->pending_request_.active) {
+      this->cancel_interval("modbus_rx_poll");
+      this->polling_active_ = false;
+    }
+  });
 }
 
 void ModbusBridgeComponent::poll_uart_response_() {
@@ -179,8 +193,6 @@ void ModbusBridgeComponent::poll_uart_response_() {
     pending_request_.active = false;
     return;
   }
-
-  this->set_timeout("modbus_rx_poll", 10, [this]() { this->poll_uart_response_(); });
 }
 
 void ModbusBridgeComponent::append_crc(std::vector<uint8_t> &data) {
