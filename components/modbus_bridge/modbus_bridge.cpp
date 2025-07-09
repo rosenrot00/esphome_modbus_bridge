@@ -1,3 +1,51 @@
+#include "modbus_bridge.h"
+#include "esphome/core/log.h"
+#include "esphome/core/helpers.h"
+#include <lwip/sockets.h>
+#include <fcntl.h>
+
+namespace esphome {
+namespace modbus_bridge {
+
+static const char *const TAG = "modbus_bridge";
+
+ModbusBridgeComponent::ModbusBridgeComponent() {}
+
+void ModbusBridgeComponent::setup() {
+  this->set_timeout("modbus_bridge_setup", 5000, [this]() {
+    this->initialize_tcp_server_();
+  });
+
+  this->set_interval("tcp_poll", this->tcp_poll_interval_ms_, [this]() {
+    this->check_tcp_sockets_();
+  });
+
+  this->polling_active_ = false;
+}
+
+void ModbusBridgeComponent::initialize_tcp_server_() {
+  this->sock_ = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+  if (this->sock_ < 0) {
+    ESP_LOGE(TAG, "Socket creation failed");
+    return;
+  }
+
+  fcntl(this->sock_, F_SETFL, O_NONBLOCK);
+
+  struct sockaddr_in server_addr = {};
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_port = htons(this->tcp_port_);
+  server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+  bind(this->sock_, (struct sockaddr *)&server_addr, sizeof(server_addr));
+  listen(this->sock_, 4);
+
+  ESP_LOGI(TAG, "Listening on port %d", this->tcp_port_);
+
+  for (auto &c : this->clients_) c.fd = -1;
+  pending_request_.active = false;
+}
+
 void ModbusBridgeComponent::check_tcp_sockets_() {
   if (this->sock_ < 0 || pending_request_.active) return;
 
@@ -42,7 +90,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
 
   for (auto &c : this->clients_) {
     if (c.fd >= 0 && FD_ISSET(c.fd, &read_fds)) {
-      constexpr size_t max_buffer = 512;
+      constexpr size_t max_buffer = 256 + 6;
       uint8_t buffer[max_buffer];
       int r = recv(c.fd, buffer, sizeof(buffer), 0);
       if (r <= 0) {
@@ -75,7 +123,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       pending_request_.client_fd = c.fd;
       memcpy(pending_request_.header, buffer, 7);
       pending_request_.response.clear();
-      pending_request_.response.reserve(512);  // deutlich größerer Buffer
+      pending_request_.response.reserve(this->uart_->get_rx_buffer_size());
       pending_request_.active = true;
       pending_request_.start_time = millis();
       pending_request_.last_size = 0;
@@ -83,10 +131,22 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
 
       this->start_uart_polling_();
       c.last_activity = now;
-      ESP_LOGD(TAG, "Started UART polling, active: %d", polling_active_);
       break;
     }
   }
+}
+
+void ModbusBridgeComponent::start_uart_polling_() {
+  if (this->polling_active_) return;
+  this->polling_active_ = true;
+
+  this->set_interval("modbus_rx_poll", 10, [this]() {
+    this->poll_uart_response_();
+    if (!this->pending_request_.active) {
+      this->cancel_interval("modbus_rx_poll");
+      this->polling_active_ = false;
+    }
+  });
 }
 
 void ModbusBridgeComponent::poll_uart_response_() {
@@ -99,10 +159,6 @@ void ModbusBridgeComponent::poll_uart_response_() {
   }
 
   size_t new_size = pending_request_.response.size();
-
-  ESP_LOGD(TAG, "Polling active: %d, Pending active: %d, No data counter: %d, Buffer size: %d",
-           polling_active_, pending_request_.active, pending_request_.no_data_counter, (int)new_size);
-
   if (new_size == pending_request_.last_size) {
     pending_request_.no_data_counter++;
   } else {
@@ -111,7 +167,13 @@ void ModbusBridgeComponent::poll_uart_response_() {
   }
 
   if (pending_request_.no_data_counter >= 2) {
-    ESP_LOGD(TAG, "End of UART data detected.");
+    if (debug_) {
+      char buf[new_size * 3 + 1];
+      char *ptr = buf;
+      for (auto b : pending_request_.response) ptr += sprintf(ptr, "%02X ", b);
+      *ptr = 0;
+      ESP_LOGD(TAG, "RTU recv (%d bytes): %s", (int)new_size, buf);
+    }
 
     std::vector<uint8_t> &response = pending_request_.response;
     std::vector<uint8_t> tcp;
@@ -122,9 +184,17 @@ void ModbusBridgeComponent::poll_uart_response_() {
     tcp.push_back(response[0]);
     tcp.insert(tcp.end(), response.begin() + 1, response.end() - 2);
 
+    if (debug_) {
+      char tbuf[tcp.size() * 3 + 1];
+      char *tptr = tbuf;
+      for (auto b : tcp) tptr += sprintf(tptr, "%02X ", b);
+      *tptr = 0;
+      ESP_LOGD(TAG, "RTU->TCP response: %s", tbuf);
+      ESP_LOGD(TAG, "Response time: %ums", millis() - pending_request_.start_time);
+    }
+
     send(pending_request_.client_fd, tcp.data(), tcp.size(), 0);
     pending_request_.active = false;
-    ESP_LOGD(TAG, "Sent TCP response, stopped UART polling.");
     return;
   }
 
@@ -135,3 +205,19 @@ void ModbusBridgeComponent::poll_uart_response_() {
     return;
   }
 }
+
+void ModbusBridgeComponent::append_crc(std::vector<uint8_t> &data) {
+  uint16_t crc = 0xFFFF;
+  for (uint8_t b : data) {
+    crc ^= b;
+    for (int i = 0; i < 8; i++) {
+      if (crc & 1) crc = (crc >> 1) ^ 0xA001;
+      else crc >>= 1;
+    }
+  }
+  data.push_back(crc & 0xFF);
+  data.push_back((crc >> 8) & 0xFF);
+}
+
+}  // namespace modbus_bridge
+}  // namespace esphome
