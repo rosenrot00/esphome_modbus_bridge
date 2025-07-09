@@ -55,9 +55,11 @@ uart:
 
 modbus_bridge:
   uart_id: uart_bus
-  tcp_port: 502         #tcp port
-  tcp_poll_interval: 50 #ms delay between catching new data from tcp
-  debug: true           #debug output to identify issues in comms
+  tcp_port: 502           #tcp port
+  tcp_poll_interval: 50   #ms delay between catching new data from tcp
+  client_timeout: 60000   #ms timeout tcp clients get disconnected if inactive
+  response_timeout: 1200  #ms modbus rtu response timeout
+  debug: true             #debug output to identify issues in comms
 ```
 ## Proven Compatibility
 
