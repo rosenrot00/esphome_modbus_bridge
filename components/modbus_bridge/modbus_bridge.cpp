@@ -90,9 +90,9 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
 
   for (auto &c : this->clients_) {
     if (c.fd >= 0 && FD_ISSET(c.fd, &read_fds)) {
-      constexpr size_t max_buffer = this->uart_->get_rx_buffer_size() + 6;
-      uint8_t buffer[max_buffer];
-      int r = recv(c.fd, buffer, sizeof(buffer), 0);
+      size_t max_buffer = this->uart_->get_rx_buffer_size() + 6;
+      std::vector<uint8_t> buffer(max_buffer);
+      int r = recv(c.fd, buffer.data(), buffer.size(), 0);
       if (r <= 0) {
         if (errno != EWOULDBLOCK && errno != EAGAIN) {
           ESP_LOGW(TAG, "Client %d disconnected or error", c.fd);
@@ -112,7 +112,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       uint8_t uid = buffer[6];
       std::vector<uint8_t> rtu;
       rtu.push_back(uid);
-      rtu.insert(rtu.end(), buffer + 7, buffer + 6 + len);
+      rtu.insert(rtu.end(), buffer.begin() + 7, buffer.begin() + 6 + len);
       append_crc(rtu);
 
       if (debug_) {
@@ -121,7 +121,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
 
       this->uart_->write_array(rtu);
       pending_request_.client_fd = c.fd;
-      memcpy(pending_request_.header, buffer, 7);
+      memcpy(pending_request_.header, buffer.data(), 7);
       pending_request_.response.clear();
       pending_request_.response.reserve(this->uart_->get_rx_buffer_size());
       pending_request_.active = true;
@@ -134,82 +134,6 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       break;
     }
   }
-}
-
-void ModbusBridgeComponent::start_uart_polling_() {
-  if (this->polling_active_) return;
-  this->polling_active_ = true;
-
-  this->set_timeout("modbus_rx_poll", 10, [this]() { poll_uart_response_(); });
-}
-
-void ModbusBridgeComponent::poll_uart_response_() {
-  if (!pending_request_.active) {
-    polling_active_ = false;
-    return;
-  }
-
-  while (this->uart_->available()) {
-    uint8_t byte;
-    if (this->uart_->read_byte(&byte)) {
-      pending_request_.response.push_back(byte);
-    }
-  }
-
-  size_t current_size = pending_request_.response.size();
-  if (current_size == pending_request_.last_size) {
-    pending_request_.no_data_counter++;
-  } else {
-    pending_request_.no_data_counter = 0;
-    pending_request_.last_size = current_size;
-  }
-
-  if (pending_request_.no_data_counter >= 2) {
-    if (debug_) {
-      std::string debug_output;
-      for (uint8_t b : pending_request_.response)
-        debug_output += str_snprintf("%02X ", 3, b);
-      ESP_LOGD(TAG, "RTU recv (%d bytes): %s", (int)current_size, debug_output.c_str());
-    }
-
-    std::vector<uint8_t> tcp_response;
-    uint16_t pdu_length = current_size - 3;
-    tcp_response.insert(tcp_response.end(), pending_request_.header, pending_request_.header + 4);
-    tcp_response.push_back(0);
-    tcp_response.push_back(pdu_length + 1);
-    tcp_response.push_back(pending_request_.response[0]);
-    tcp_response.insert(tcp_response.end(), pending_request_.response.begin() + 1, pending_request_.response.end() - 2);
-
-    send(pending_request_.client_fd, tcp_response.data(), tcp_response.size(), 0);
-    pending_request_.response.clear();
-    pending_request_.active = false;
-    polling_active_ = false;
-    return;
-  }
-
-  if (millis() - pending_request_.start_time > 1000) {
-    ESP_LOGW(TAG, "Modbus timeout: no valid response received.");
-    pending_request_.response.clear();
-    pending_request_.active = false;
-    polling_active_ = false;
-    return;
-  }
-
-  this->set_timeout("modbus_rx_poll", 10, [this]() { poll_uart_response_(); });
-}
-
-
-void ModbusBridgeComponent::append_crc(std::vector<uint8_t> &data) {
-  uint16_t crc = 0xFFFF;
-  for (uint8_t b : data) {
-    crc ^= b;
-    for (int i = 0; i < 8; i++) {
-      if (crc & 1) crc = (crc >> 1) ^ 0xA001;
-      else crc >>= 1;
-    }
-  }
-  data.push_back(crc & 0xFF);
-  data.push_back((crc >> 8) & 0xFF);
 }
 
 }  // namespace modbus_bridge
