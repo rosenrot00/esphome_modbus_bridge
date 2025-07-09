@@ -1,4 +1,5 @@
 #pragma once
+
 #include "esphome/core/component.h"
 #include "esphome/components/uart/uart.h"
 #include <vector>
@@ -38,8 +39,10 @@ class ModbusBridgeComponent : public Component {
   PendingRequest pending_request_;
   uint16_t tcp_port_{502};
   bool debug_{false};
-  uint32_t tcp_poll_interval_ms_{10};
+  uint32_t tcp_poll_interval_ms_{50};
 
+  bool polling_active_{false};
+  void start_uart_polling_();
   void append_crc(std::vector<uint8_t> &data);
   void initialize_tcp_server_();
   void poll_uart_response_();
