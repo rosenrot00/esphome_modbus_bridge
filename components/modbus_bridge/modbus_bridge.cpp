@@ -117,6 +117,11 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
 
       if (debug_) {
         ESP_LOGD(TAG, "TCP->RTU UID: %d, FC: 0x%02X, LEN: %d", uid, rtu[1], len);
+        char buf[rtu.size() * 3 + 1];
+        char *ptr = buf;
+        for (auto b : rtu) ptr += sprintf(ptr, "%02X ", b);
+        *ptr = 0;
+        ESP_LOGD(TAG, "RTU send: %s", buf);
       }
 
       this->uart_->write_array(rtu);
@@ -180,6 +185,14 @@ void ModbusBridgeComponent::poll_uart_response_() {
     tcp_response.push_back(pending_request_.response[0]);
     tcp_response.insert(tcp_response.end(), pending_request_.response.begin() + 1, pending_request_.response.end() - 2);
 
+    if (debug_) {
+      std::string tcp_debug;
+      for (uint8_t b : tcp_response)
+        tcp_debug += str_snprintf("%02X ", 3, b);
+      ESP_LOGD(TAG, "RTU->TCP response: %s", tcp_debug.c_str());
+      ESP_LOGD(TAG, "Response time: %ums", millis() - pending_request_.start_time);
+    }
+
     send(pending_request_.client_fd, tcp_response.data(), tcp_response.size(), 0);
     pending_request_.response.clear();
     pending_request_.active = false;
@@ -197,7 +210,6 @@ void ModbusBridgeComponent::poll_uart_response_() {
 
   this->set_timeout("modbus_rx_poll", 10, [this]() { poll_uart_response_(); });
 }
-
 
 void ModbusBridgeComponent::append_crc(std::vector<uint8_t> &data) {
   uint16_t crc = 0xFFFF;
