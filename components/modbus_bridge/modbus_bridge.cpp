@@ -117,17 +117,13 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
 
       if (debug_) {
         ESP_LOGD(TAG, "TCP->RTU UID: %d, FC: 0x%02X, LEN: %d", uid, rtu[1], len);
-        char buf[rtu.size() * 3 + 1];
-        char *ptr = buf;
-        for (auto b : rtu) ptr += sprintf(ptr, "%02X ", b);
-        *ptr = 0;
-        ESP_LOGD(TAG, "RTU send: %s", buf);
       }
 
       this->uart_->write_array(rtu);
       pending_request_.client_fd = c.fd;
       memcpy(pending_request_.header, buffer, 7);
       pending_request_.response.clear();
+      pending_request_.response.reserve(this->uart_->get_rx_buffer_size());
       pending_request_.active = true;
       pending_request_.start_time = millis();
       pending_request_.last_size = 0;
