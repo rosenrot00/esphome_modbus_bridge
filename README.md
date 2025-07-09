@@ -1,6 +1,6 @@
 # ESPHome Modbus TCP to RTU Bridge
 
-This ESPHome component implements a Modbus TCP to Modbus RTU bridge that acts as a Modbus RTU master over UART. It allows multiple Modbus TCP clients to communicate with Modbus RTU slaves via RS485 or other UART-compatible hardware.
+This ESPHome component implements a transparent Modbus TCP to Modbus RTU bridge that acts as a Modbus RTU master over UART. It allows multiple Modbus TCP clients to communicate with Modbus RTU slaves via RS485 or other UART-compatible hardware.
 
 ## Protocol Overview
 
@@ -59,6 +59,18 @@ modbus_bridge:
   tcp_poll_interval: 50 #delay between catching new data from tcp
   debug: true           #debug output to identify issues in comms
 ```
-## Compatibility
+## Proven Compatibility
 
 This bridge has been tested successfully with the [homeassistant-solax-modbus](https://github.com/wills106/homeassistant-solax-modbus) integration.
+```
+[07:32:40][D][modbus_bridge:104]: TCP->RTU UID: 1, FC: 0x03, LEN: 6
+[07:32:40][D][modbus_bridge:109]: RTU send: 01 03 01 02 00 5F A5 CE 
+[07:32:40][D][modbus_bridge:150]: RTU recv (195 bytes): 01 03 BE 00 00 00 00 00 03 00 03 00 00 00 00 00 01 00 01 00 02 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 0A C8 07 30 00 00 00 00 00 00 00 00 00 00 00 00 00 1E 00 00 00 00 00 00 07 D0 00 50 03 E8 00 28 00 1E 03 20 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 F4 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+[07:32:40][D][modbus_bridge:167]: RTU->TCP response: 09 BE 00 00 00 C1 01 03 BE 00 00 00 00 00 03 00 03 00 00 00 00 00 01 00 01 00 02 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 0A C8 07 30 00 00 00 00 00 00 00 00 00 00 00 00 00 1E 00 00 00 00 00 00 07 D0 00 50 03 E8 00 28 00 1E 03 20 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 F4 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+[07:32:40][D][modbus_bridge:168]: Response time: 106ms
+[07:32:40][D][modbus_bridge:104]: TCP->RTU UID: 1, FC: 0x04, LEN: 6
+[07:32:40][D][modbus_bridge:109]: RTU send: 01 04 00 00 00 55 30 35 
+[07:32:40][D][modbus_bridge:150]: RTU recv (175 bytes): 01 04 AA 09 65 00 0B 01 5E 0F 32 15 DC 00 2D 00 44 13 87 00 31 00 02 06 DF 0E EA 00 1E 10 EE 17 E6 00 02 09 5B 13 87 00 07 00 00 0A A8 00 B6 13 80 00 01 00 18 00 01 00 00 00 00 00 3E 01 37 00 00 00 00 00 25 01 63 00 00 00 1F 01 9A 01 C2 32 00 00 00 00 01 00 00 01 9A 00 0A 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 05 50 00 00 00 5B
+[07:32:40][D][modbus_bridge:167]: RTU->TCP response: 09 BF 00 00 00 AD 01 04 AA 09 65 00 0B 01 5E 0F 32 15 DC 00 2D 00 44 13 87 00 31 00 02 06 DF 0E EA 00 1E 10 EE 17 E6 00 02 09 5B 13 87 00 07 00 00 0A A8 00 B6 13 80 00 01 00 18 00 01 00 00 00 00 00 3E 01 37 00 00 00 00 00 25 01 63 00 00 00 1F 01 9A 01 C2 32 00 00 00 00 01 00 00 01 9A 00 0A 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 05
+[07:32:40][D][modbus_bridge:168]: Response time: 117ms
+```
