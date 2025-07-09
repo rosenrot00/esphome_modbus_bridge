@@ -90,7 +90,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
 
   for (auto &c : this->clients_) {
     if (c.fd >= 0 && FD_ISSET(c.fd, &read_fds)) {
-      constexpr size_t max_buffer = 256 + 6;
+      constexpr size_t max_buffer = this->uart_->get_rx_buffer_size() + 6;
       uint8_t buffer[max_buffer];
       int r = recv(c.fd, buffer, sizeof(buffer), 0);
       if (r <= 0) {
@@ -140,71 +140,64 @@ void ModbusBridgeComponent::start_uart_polling_() {
   if (this->polling_active_) return;
   this->polling_active_ = true;
 
-  this->set_interval("modbus_rx_poll", 10, [this]() {
-    this->poll_uart_response_();
-    if (!this->pending_request_.active) {
-      this->cancel_interval("modbus_rx_poll");
-      this->polling_active_ = false;
-    }
-  });
+  this->set_timeout("modbus_rx_poll", 10, [this]() { poll_uart_response_(); });
 }
 
 void ModbusBridgeComponent::poll_uart_response_() {
-  if (!pending_request_.active) return;
-
-  while (this->uart_->available()) {
-    uint8_t b;
-    this->uart_->read_byte(&b);
-    pending_request_.response.push_back(b);
+  if (!pending_request_.active) {
+    polling_active_ = false;
+    return;
   }
 
-  size_t new_size = pending_request_.response.size();
-  if (new_size == pending_request_.last_size) {
+  while (this->uart_->available()) {
+    uint8_t byte;
+    if (this->uart_->read_byte(&byte)) {
+      pending_request_.response.push_back(byte);
+    }
+  }
+
+  size_t current_size = pending_request_.response.size();
+  if (current_size == pending_request_.last_size) {
     pending_request_.no_data_counter++;
   } else {
     pending_request_.no_data_counter = 0;
-    pending_request_.last_size = new_size;
+    pending_request_.last_size = current_size;
   }
 
   if (pending_request_.no_data_counter >= 2) {
     if (debug_) {
-      char buf[new_size * 3 + 1];
-      char *ptr = buf;
-      for (auto b : pending_request_.response) ptr += sprintf(ptr, "%02X ", b);
-      *ptr = 0;
-      ESP_LOGD(TAG, "RTU recv (%d bytes): %s", (int)new_size, buf);
+      std::string debug_output;
+      for (uint8_t b : pending_request_.response)
+        debug_output += str_snprintf("%02X ", 3, b);
+      ESP_LOGD(TAG, "RTU recv (%d bytes): %s", (int)current_size, debug_output.c_str());
     }
 
-    std::vector<uint8_t> &response = pending_request_.response;
-    std::vector<uint8_t> tcp;
-    uint16_t pdulen = response.size() - 3;
-    tcp.insert(tcp.end(), pending_request_.header, pending_request_.header + 4);
-    tcp.push_back(0);
-    tcp.push_back(pdulen + 1);
-    tcp.push_back(response[0]);
-    tcp.insert(tcp.end(), response.begin() + 1, response.end() - 2);
+    std::vector<uint8_t> tcp_response;
+    uint16_t pdu_length = current_size - 3;
+    tcp_response.insert(tcp_response.end(), pending_request_.header, pending_request_.header + 4);
+    tcp_response.push_back(0);
+    tcp_response.push_back(pdu_length + 1);
+    tcp_response.push_back(pending_request_.response[0]);
+    tcp_response.insert(tcp_response.end(), pending_request_.response.begin() + 1, pending_request_.response.end() - 2);
 
-    if (debug_) {
-      char tbuf[tcp.size() * 3 + 1];
-      char *tptr = tbuf;
-      for (auto b : tcp) tptr += sprintf(tptr, "%02X ", b);
-      *tptr = 0;
-      ESP_LOGD(TAG, "RTU->TCP response: %s", tbuf);
-      ESP_LOGD(TAG, "Response time: %ums", millis() - pending_request_.start_time);
-    }
-
-    send(pending_request_.client_fd, tcp.data(), tcp.size(), 0);
+    send(pending_request_.client_fd, tcp_response.data(), tcp_response.size(), 0);
+    pending_request_.response.clear();
     pending_request_.active = false;
+    polling_active_ = false;
     return;
   }
 
-  if (millis() - pending_request_.start_time > this->modbus_response_timeout_ms_) {
+  if (millis() - pending_request_.start_time > 1000) {
     ESP_LOGW(TAG, "Modbus timeout: no valid response received.");
     pending_request_.response.clear();
     pending_request_.active = false;
+    polling_active_ = false;
     return;
   }
+
+  this->set_timeout("modbus_rx_poll", 10, [this]() { poll_uart_response_(); });
 }
+
 
 void ModbusBridgeComponent::append_crc(std::vector<uint8_t> &data) {
   uint16_t crc = 0xFFFF;
