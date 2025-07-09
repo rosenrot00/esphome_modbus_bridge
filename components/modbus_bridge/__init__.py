@@ -13,7 +13,7 @@ CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(ModbusBridgeComponent),
     cv.Required("uart_id"): cv.use_id(uart.UARTComponent),
     cv.Optional(CONF_TCP_PORT, default=502): cv.port,
-    cv.Optional(CONF_TCP_POLL_INTERVAL, default=10): cv.positive_int,
+    cv.Optional(CONF_TCP_POLL_INTERVAL, default=50): cv.positive_int,
     cv.Optional(CONF_DEBUG, default=False): cv.boolean,
 }).extend(cv.COMPONENT_SCHEMA)
 
