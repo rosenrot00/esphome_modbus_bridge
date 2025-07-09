@@ -55,8 +55,9 @@ uart:
 
 modbus_bridge:
   uart_id: uart_bus
-  tcp_port: 502
-  debug: true
+  tcp_port: 502         #tcp port
+  tcp_poll_interval: 50 #delay between catching new data from tcp
+  debug: true           #debug output to identify issues in comms
 ```
 ## Compatibility
 
