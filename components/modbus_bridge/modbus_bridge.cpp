@@ -94,9 +94,10 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       std::vector<uint8_t> buffer(max_buffer);
       int r = recv(c.fd, buffer.data(), buffer.size(), 0);
       if (r == 0) {
-        ESP_LOGI(TAG, "Client %d disconnected cleanly", c.fd);
-        close(c.fd);
-        c.fd = -1;
+        ESP_LOGW(TAG, "Client %d recv == 0 (no data), keeping connection", c.fd);
+        //ESP_LOGI(TAG, "Client %d disconnected cleanly", c.fd);
+        //close(c.fd);
+        //c.fd = -1;
         continue;
       }
       if (r < 0) {
