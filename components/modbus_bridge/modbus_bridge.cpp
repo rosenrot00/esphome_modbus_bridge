@@ -93,9 +93,15 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       size_t max_buffer = this->uart_->get_rx_buffer_size() + 6;
       std::vector<uint8_t> buffer(max_buffer);
       int r = recv(c.fd, buffer.data(), buffer.size(), 0);
-      if (r <= 0) {
+      if (r == 0) {
+        ESP_LOGI(TAG, "Client %d disconnected cleanly", c.fd);
+        close(c.fd);
+        c.fd = -1;
+        continue;
+      }
+      if (r < 0) {
         if (errno != EWOULDBLOCK && errno != EAGAIN) {
-          ESP_LOGW(TAG, "Client %d disconnected or error", c.fd);
+          ESP_LOGW(TAG, "Client %d socket error: %s", c.fd, strerror(errno));
           close(c.fd);
           c.fd = -1;
         }
