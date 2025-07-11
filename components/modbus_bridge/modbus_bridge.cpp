@@ -161,6 +161,7 @@ void ModbusBridgeComponent::poll_uart_response_() {
     return;
   }
 
+  // Neue Bytes vom UART lesen
   while (this->uart_->available()) {
     uint8_t byte;
     if (this->uart_->read_byte(&byte)) {
@@ -169,6 +170,23 @@ void ModbusBridgeComponent::poll_uart_response_() {
   }
 
   size_t current_size = pending_request_.response.size();
+
+  // 👇 NEU: Wenn noch keine Daten angekommen sind, initial 1s warten
+  if (current_size == 0) {
+    if (millis() - pending_request_.start_time > this->response_timeout_ms_) {
+      ESP_LOGW(TAG, "Modbus timeout: no response received (no first byte).");
+      pending_request_.response.clear();
+      pending_request_.active = false;
+      polling_active_ = false;
+      return;
+    }
+
+    // Wieder nachschauen
+    this->set_timeout("modbus_rx_poll", 10, [this]() { poll_uart_response_(); });
+    return;
+  }
+
+  // Wenn Daten angekommen sind: normale no_data_counter-Auswertung
   if (current_size == pending_request_.last_size) {
     pending_request_.no_data_counter++;
   } else {
@@ -207,8 +225,9 @@ void ModbusBridgeComponent::poll_uart_response_() {
     return;
   }
 
-  if (millis() - pending_request_.start_time > 1000) {
-    ESP_LOGW(TAG, "Modbus timeout: no valid response received.");
+  // Timeout nach 1s trotz erster Bytes → abbrechen
+  if (millis() - pending_request_.start_time > this->response_timeout_ms_) {
+    ESP_LOGW(TAG, "Modbus timeout: response incomplete.");
     pending_request_.response.clear();
     pending_request_.active = false;
     polling_active_ = false;
