@@ -130,7 +130,8 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
         *ptr = 0;
         ESP_LOGD(TAG, "RTU send: %s", buf);
       }
-
+      
+      this->uart_->flush();
       this->uart_->write_array(rtu);
       pending_request_.client_fd = c.fd;
       memcpy(pending_request_.header, buffer.data(), 7);
