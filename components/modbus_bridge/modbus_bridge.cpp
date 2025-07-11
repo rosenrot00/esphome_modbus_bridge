@@ -171,9 +171,9 @@ void ModbusBridgeComponent::poll_uart_response_() {
 
   size_t current_size = pending_request_.response.size();
 
-  // 👇 NEU: Wenn noch keine Daten angekommen sind, initial 1s warten
+  // Wenn noch keine Daten angekommen sind, initial 1s warten
   if (current_size == 0) {
-    if (millis() - pending_request_.start_time > this->response_timeout_ms_) {
+    if (millis() - pending_request_.start_time > 1000) {
       ESP_LOGW(TAG, "Modbus timeout: no response received (no first byte).");
       pending_request_.response.clear();
       pending_request_.active = false;
