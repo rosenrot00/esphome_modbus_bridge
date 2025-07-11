@@ -226,7 +226,7 @@ void ModbusBridgeComponent::poll_uart_response_() {
   }
 
   // Timeout nach 1s trotz erster Bytes → abbrechen
-  if (millis() - pending_request_.start_time > this->response_timeout_ms_) {
+  if (millis() - pending_request_.start_time > 1000) {
     ESP_LOGW(TAG, "Modbus timeout: response incomplete.");
     pending_request_.response.clear();
     pending_request_.active = false;
