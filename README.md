@@ -93,10 +93,18 @@ This tool is useful for testing, diagnostics, or integrating Modbus-capable devi
 --read_input   Read Input Registers (Function Code 0x04)
 ```
 #### Examples
+
+- Read Holding Registers (FC 0x03)
 ```
-python modbus_rw.py --host 192.168.0.10 --register 0x0010 --count 2 --read        Read Holding Registers (FC 0x03)
-python modbus_rw.py --host 192.168.0.10 --register 0x0010 --count 2 --read_input  Read Input Registers (FC 0x04)
-python modbus_rw.py --host 192.168.0.10 --register 0x0010 --value 0x1234          Write a Single Holding Register (FC 0x06)
+python modbus_rw.py --host 192.168.0.10 --register 0x0010 --count 2 --read
+```
+- Read Input Registers (FC 0x04)
+```
+python modbus_rw.py --host 192.168.0.10 --register 0x0010 --count 2 --read_input
+```
+- Write a Single Holding Register (FC 0x06)
+```
+python modbus_rw.py --host 192.168.0.10 --register 0x0010 --value 0x1234
 ```
 #### Requirements
 - Python 3.x  
