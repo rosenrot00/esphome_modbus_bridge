@@ -2,11 +2,11 @@
 
 This ESPHome component implements a transparent Modbus TCP to Modbus RTU bridge that acts as a Modbus RTU master over UART. It allows multiple Modbus TCP clients to communicate with Modbus RTU slaves via RS485 or other UART-compatible hardware.
 
-## Protocol Overview
+#### Protocol Overview
 
 The bridge listens on a configurable TCP port (default: 502) and expects standard Modbus TCP frames from clients. Each request is translated into a Modbus RTU frame, transmitted over UART, and the response is converted back into Modbus TCP and returned to the client.
 
-### Modbus TCP Request Format
+#### Modbus TCP Request Format
 
 Each Modbus TCP request must follow this format:
 
@@ -17,7 +17,7 @@ Each Modbus TCP request must follow this format:
 - **PDU**: n bytes (Function code and data)
 
 Example (read holding registers, unit ID 1, starting at 0x0000, count 1):
-
+```
 00 01   - Transaction ID
 00 00   - Protocol ID
 00 06   - Length
@@ -25,10 +25,10 @@ Example (read holding registers, unit ID 1, starting at 0x0000, count 1):
 03      - Function code (Read Holding Registers)
 00 00   - Start address high/low
 00 01   - Register count high/low
-
+```
 The response will match the Modbus TCP format and contain the same transaction ID.
 
-## Features
+#### Features
 
 - Acts as a Modbus RTU master on the UART interface
 - Accepts Modbus TCP connections from multiple clients
@@ -37,7 +37,7 @@ The response will match the Modbus TCP format and contain the same transaction I
 - Works with any Modbus function code
 - Compatible with Home Assistant and third-party Modbus TCP tools
 
-## ESPHome Configuration Example
+#### ESPHome Configuration Example
 
 ```yaml
 external_components:
@@ -61,7 +61,7 @@ modbus_bridge:
   response_timeout: 1200  #ms modbus rtu response timeout
   debug: true             #debug output to identify issues in comms
 ```
-## Proven Compatibility
+#### Proven Compatibility
 
 This bridge has been tested successfully with the [homeassistant-solax-modbus](https://github.com/wills106/homeassistant-solax-modbus) integration.
 ```
@@ -76,3 +76,29 @@ This bridge has been tested successfully with the [homeassistant-solax-modbus](h
 [07:32:40][D][modbus_bridge:167]: RTU->TCP response: 09 BF 00 00 00 AD 01 04 AA 09 65 00 0B 01 5E 0F 32 15 DC 00 2D 00 44 13 87 00 31 00 02 06 DF 0E EA 00 1E 10 EE 17 E6 00 02 09 5B 13 87 00 07 00 00 0A A8 00 B6 13 80 00 01 00 18 00 01 00 00 00 00 00 3E 01 37 00 00 00 00 00 25 01 63 00 00 00 1F 01 9A 01 C2 32 00 00 00 00 01 00 00 01 9A 00 0A 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 05
 [07:32:40][D][modbus_bridge:168]: Response time: 117ms
 ```
+## modbus_rw.py – Modbus TCP Register Read/Write Tool
+
+`modbus_rw.py` is a simple command-line utility for reading and writing Modbus TCP registers using the `pymodbus` library.  
+It supports reading Holding Registers (Function Code 0x03), Input Registers (0x04), and writing a single Holding Register (0x06).  
+This tool is useful for testing, diagnostics, or integrating Modbus-capable devices in a network environment.
+#### Arguments
+```
+--host         Modbus TCP server IP address (required)
+--port         Modbus TCP port (default: 502)
+--unit         Modbus unit ID / slave ID (default: 1)
+--register     Register address to read/write (decimal or hex, e.g. 0x10) (required)
+--count        Number of registers to read (default: 1)
+--value        Value to write to register (used for write operation)
+--read         Read Holding Registers (Function Code 0x03)
+--read_input   Read Input Registers (Function Code 0x04)
+```
+#### Examples
+```
+python modbus_rw.py --host 192.168.0.10 --register 0x10 --count 2 --read        Read Holding Registers (FC 0x03)
+python modbus_rw.py --host 192.168.0.10 --register 0x10 --count 2 --read_input  Read Input Registers (FC 0x04)
+python modbus_rw.py --host 192.168.0.10 --register 0x10 --value 0x1234          Write a Single Holding Register (FC 0x06)
+```
+#### Requirements
+- Python 3.x  
+- `pymodbus` library  
+  Install via: pip install pymodbus
