@@ -45,7 +45,7 @@ def main():
             print(f"Error reading register: {result}")
         else:
             logging.debug(f"Raw register data: {result.registers}")
-            decoder = BinaryPayloadDecoder.fromRegisters(result.registers, byteorder=Endian.Big)
+            decoder = BinaryPayloadDecoder.fromRegisters(result.registers, byteorder=Endian.BIG)
             raw_hex = ' '.join(f'{byte:02X}' for byte in decoder.decode_string(len(result.registers) * 2))
             print(f"Data ({args.count} registers):\n{raw_hex}")
 
