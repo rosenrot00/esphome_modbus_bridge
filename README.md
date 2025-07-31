@@ -54,12 +54,26 @@ uart:
   stop_bits: 1
 
 modbus_bridge:
+  id: mb_bridge
   uart_id: uart_bus
   tcp_port: 502           #tcp port
   tcp_poll_interval: 50   #ms delay between catching new data from tcp
   client_timeout: 60000   #ms timeout tcp clients get disconnected if inactive
   response_timeout: 1200  #ms modbus rtu response timeout
-  debug: true             #debug output to identify issues in comms
+
+switch:
+  - platform: template
+    name: "Modbus Bridge Debug"
+    id: modbus_debug_switch
+    restore_mode: RESTORE_DEFAULT_OFF  ##debug is disabled by default on first boot, and the state is preserved across reboots.
+    turn_on_action:
+      - lambda: |-
+          id(mb_bridge).set_debug(true);
+          id(modbus_debug_switch).publish_state(true);
+    turn_off_action:
+      - lambda: |-
+          id(mb_bridge).set_debug(false);
+          id(modbus_debug_switch).publish_state(false);
 ```
 #### Proven Compatibility
 
