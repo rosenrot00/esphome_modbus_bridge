@@ -4,12 +4,13 @@
 #include "esphome/components/uart/uart.h"
 #include <vector>
 
+
 namespace esphome {
 namespace modbus_bridge {
 
 struct TCPClient {
   int fd = -1;
-  uint32_t last_activity = 0;  // ⬅️ für Timeout-Überwachung
+  uint32_t last_activity = 0;
 };
 
 struct PendingRequest {
@@ -22,16 +23,18 @@ struct PendingRequest {
   int no_data_counter = 0;
 };
 
+class ModbusBridgeComponent;  // Forward declaration
+
 class ModbusBridgeComponent : public Component {
  public:
   ModbusBridgeComponent();
 
   void set_uart_id(uart::UARTComponent *uart) { uart_ = uart; }
   void set_tcp_port(uint16_t port) { tcp_port_ = port; }
-  void set_debug(bool debug) { debug_ = debug; }
   void set_tcp_poll_interval(uint32_t interval_ms) { tcp_poll_interval_ms_ = interval_ms; }
   void set_client_timeout(uint32_t timeout_ms) { client_timeout_ms_ = timeout_ms; }
   void set_response_timeout(uint32_t ms) { modbus_response_timeout_ms_ = ms; }
+  void set_debug(bool debug);
 
   void setup() override;
 
@@ -45,6 +48,7 @@ class ModbusBridgeComponent : public Component {
   uint32_t tcp_poll_interval_ms_{50};
   uint32_t client_timeout_ms_{30000};
   uint32_t modbus_response_timeout_ms_{1000};
+
 
   bool polling_active_{false};
   void start_uart_polling_();
