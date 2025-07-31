@@ -83,7 +83,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
         if (c.fd < 0) {
           c.fd = newfd;
           c.last_activity = millis();
-          ESP_LOGD(TAG, "Client connected: %d", newfd);
+          ESP_LOGI(TAG, "Client connected: %d", newfd);
           break;
         }
       }
