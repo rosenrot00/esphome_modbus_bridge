@@ -1,7 +1,7 @@
 import esphome.config_validation as cv
 import esphome.codegen as cg
 from esphome.components import uart
-from esphome.const import CONF_ID, CONF_DEBUG
+from esphome.const import CONF_ID
 
 CONF_TCP_PORT = "tcp_port"
 CONF_TCP_POLL_INTERVAL = "tcp_poll_interval"
@@ -18,7 +18,6 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_TCP_POLL_INTERVAL, default=50): cv.positive_int,
     cv.Optional(CONF_CLIENT_TIMEOUT, default=30000): cv.positive_int,
     cv.Optional(CONF_RESPONSE_TIMEOUT, default=1000): cv.positive_int,
-    cv.Optional(CONF_DEBUG, default=False): cv.boolean,
 }).extend(cv.COMPONENT_SCHEMA)
 
 async def to_code(config):
@@ -28,7 +27,6 @@ async def to_code(config):
     uart_comp = await cg.get_variable(config["uart_id"])
     cg.add(var.set_uart_id(uart_comp))
     cg.add(var.set_tcp_port(config[CONF_TCP_PORT]))
-    cg.add(var.set_debug(config[CONF_DEBUG]))
     cg.add(var.set_tcp_poll_interval(config[CONF_TCP_POLL_INTERVAL]))
     cg.add(var.set_client_timeout(config[CONF_CLIENT_TIMEOUT]))
     cg.add(var.set_response_timeout(config[CONF_RESPONSE_TIMEOUT]))
