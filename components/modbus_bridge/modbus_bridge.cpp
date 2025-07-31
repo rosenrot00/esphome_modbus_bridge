@@ -4,8 +4,10 @@
 #include <lwip/sockets.h>
 #include <fcntl.h>
 
+
 namespace esphome {
 namespace modbus_bridge {
+
 
 static const char *const TAG = "modbus_bridge";
 
@@ -122,7 +124,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       rtu.insert(rtu.end(), buffer.begin() + 7, buffer.begin() + 6 + len);
       append_crc(rtu);
 
-      if (debug_) {
+      if (this->debug_) {
         ESP_LOGD(TAG, "TCP->RTU UID: %d, FC: 0x%02X, LEN: %d", uid, rtu[1], len);
         char buf[rtu.size() * 3 + 1];
         char *ptr = buf;
@@ -196,7 +198,7 @@ void ModbusBridgeComponent::poll_uart_response_() {
   }
 
   if (pending_request_.no_data_counter >= 2) {
-    if (debug_) {
+    if (this->debug_) {
       std::string debug_output;
       for (uint8_t b : pending_request_.response)
         debug_output += str_snprintf("%02X ", 3, b);
@@ -211,7 +213,7 @@ void ModbusBridgeComponent::poll_uart_response_() {
     tcp_response.push_back(pending_request_.response[0]);
     tcp_response.insert(tcp_response.end(), pending_request_.response.begin() + 1, pending_request_.response.end() - 2);
 
-    if (debug_) {
+    if (this->debug_) {
       std::string tcp_debug;
       for (uint8_t b : tcp_response)
         tcp_debug += str_snprintf("%02X ", 3, b);
@@ -250,6 +252,13 @@ void ModbusBridgeComponent::append_crc(std::vector<uint8_t> &data) {
   data.push_back(crc & 0xFF);
   data.push_back((crc >> 8) & 0xFF);
 }
+
+
+void ModbusBridgeComponent::set_debug(bool debug) {
+  this->debug_ = debug;
+  ESP_LOGI(TAG, "Debug mode %s", debug ? "enabled" : "disabled");
+}
+
 
 }  // namespace modbus_bridge
 }  // namespace esphome
