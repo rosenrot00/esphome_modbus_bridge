@@ -20,7 +20,7 @@ struct PendingRequest {
   bool active = false;
   uint32_t start_time = 0;
   size_t last_size = 0;
-  int no_data_counter = 0;
+  uint32_t last_change = 0;
 };
 
 class ModbusBridgeComponent;  // Forward declaration
@@ -48,6 +48,7 @@ class ModbusBridgeComponent : public Component {
   uint32_t tcp_poll_interval_ms_{50};
   uint32_t client_timeout_ms_{30000};
   uint32_t modbus_response_timeout_ms_{1000};
+  uint32_t inactivity_timeout_ms_{20};
 
 
   bool polling_active_{false};
