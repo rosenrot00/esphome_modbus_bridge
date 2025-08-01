@@ -3,6 +3,7 @@
 #include "esphome/core/helpers.h"
 #include <lwip/sockets.h>
 #include <fcntl.h>
+#include <cmath>
 
 
 namespace esphome {
@@ -22,6 +23,7 @@ void ModbusBridgeComponent::setup() {
     this->check_tcp_sockets_();
   });
 
+  this->inactivity_timeout_ms_ = static_cast<uint32_t>(std::ceil((10000.0 / this->uart_->get_baud_rate()) * 3.5 + 1));
   this->polling_active_ = false;
 }
 
@@ -142,7 +144,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       pending_request_.active = true;
       pending_request_.start_time = millis();
       pending_request_.last_size = 0;
-      pending_request_.no_data_counter = 0;
+      pending_request_.last_change = millis();
 
       this->start_uart_polling_();
       c.last_activity = now;
@@ -189,15 +191,13 @@ void ModbusBridgeComponent::poll_uart_response_() {
     return;
   }
 
-  // Wenn Daten angekommen sind: normale no_data_counter-Auswertung
-  if (current_size == pending_request_.last_size) {
-    pending_request_.no_data_counter++;
-  } else {
-    pending_request_.no_data_counter = 0;
+  // Wenn Daten angekommen sind: neue Logik mit last_change
+  if (current_size > pending_request_.last_size) {
     pending_request_.last_size = current_size;
+    pending_request_.last_change = millis();
   }
 
-  if (pending_request_.no_data_counter >= 2) {
+  if (millis() - pending_request_.last_change > this->inactivity_timeout_ms_) {
     if (this->debug_) {
       std::string debug_output;
       for (uint8_t b : pending_request_.response)
