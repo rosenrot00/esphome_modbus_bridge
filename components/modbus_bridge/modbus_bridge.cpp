@@ -14,6 +14,10 @@ static const char *const TAG = "modbus_bridge";
 
 ModbusBridgeComponent::ModbusBridgeComponent() {}
 
+void ModbusBridgeComponent::set_rtu_response_timeout(uint32_t timeout) {
+  this->rtu_response_timeout_ms_ = timeout;
+}
+
 void ModbusBridgeComponent::setup() {
   this->set_timeout("modbus_bridge_setup", 5000, [this]() {
     this->initialize_tcp_server_();
@@ -23,8 +27,13 @@ void ModbusBridgeComponent::setup() {
     this->check_tcp_sockets_();
   });
 
-  this->inactivity_timeout_ms_ = static_cast<uint32_t>(std::ceil((10000.0 / this->uart_->get_baud_rate()) * 3.5 + 1));
+  this->rtu_inactivity_timeout_ms_ = static_cast<uint32_t>(std::ceil((10000.0 / this->uart_->get_baud_rate()) * 3.5 + 1));
+  this->rtu_poll_interval_ms_ = this->rtu_inactivity_timeout_ms_ + 2;
   this->polling_active_ = false;
+  if (this->rtu_response_timeout_ms_ == 0) {
+    ESP_LOGW(TAG, "RTU response timeout not set via YAML – falling back to 100 ms.");
+    this->rtu_response_timeout_ms_ = 100;
+  }
 }
 
 void ModbusBridgeComponent::initialize_tcp_server_() {
@@ -62,7 +71,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
 
   for (auto &c : this->clients_) {
     if (c.fd >= 0) {
-      if (now - c.last_activity > this->client_timeout_ms_) {
+      if (now - c.last_activity > this->tcp_client_timeout_ms_) {
         ESP_LOGW(TAG, "Client timeout: closing fd %d", c.fd);
         close(c.fd);
         c.fd = -1;
@@ -157,7 +166,7 @@ void ModbusBridgeComponent::start_uart_polling_() {
   if (this->polling_active_) return;
   this->polling_active_ = true;
 
-  this->set_timeout("modbus_rx_poll", 10, [this]() { poll_uart_response_(); });
+  this->set_timeout("modbus_rx_poll", this->rtu_poll_interval_ms_, [this]() { poll_uart_response_(); });
 }
 
 void ModbusBridgeComponent::poll_uart_response_() {
@@ -166,7 +175,6 @@ void ModbusBridgeComponent::poll_uart_response_() {
     return;
   }
 
-  // Neue Bytes vom UART lesen
   while (this->uart_->available()) {
     uint8_t byte;
     if (this->uart_->read_byte(&byte)) {
@@ -176,9 +184,8 @@ void ModbusBridgeComponent::poll_uart_response_() {
 
   size_t current_size = pending_request_.response.size();
 
-  // Wenn noch keine Daten angekommen sind, initial 1s warten
   if (current_size == 0) {
-    if (millis() - pending_request_.start_time > 1000) {
+    if (millis() - pending_request_.start_time > this->rtu_response_timeout_ms_) {
       ESP_LOGW(TAG, "Modbus timeout: no response received (no first byte).");
       pending_request_.response.clear();
       pending_request_.active = false;
@@ -186,18 +193,16 @@ void ModbusBridgeComponent::poll_uart_response_() {
       return;
     }
 
-    // Wieder nachschauen
-    this->set_timeout("modbus_rx_poll", 10, [this]() { poll_uart_response_(); });
+    this->set_timeout("modbus_rx_poll", this->rtu_poll_interval_ms_, [this]() { poll_uart_response_(); });
     return;
   }
 
-  // Wenn Daten angekommen sind: neue Logik mit last_change
   if (current_size > pending_request_.last_size) {
     pending_request_.last_size = current_size;
     pending_request_.last_change = millis();
   }
 
-  if (millis() - pending_request_.last_change > this->inactivity_timeout_ms_) {
+  if (millis() - pending_request_.last_change > this->rtu_inactivity_timeout_ms_) {
     if (this->debug_) {
       std::string debug_output;
       for (uint8_t b : pending_request_.response)
@@ -228,8 +233,7 @@ void ModbusBridgeComponent::poll_uart_response_() {
     return;
   }
 
-  // Timeout nach 1s trotz erster Bytes → abbrechen
-  if (millis() - pending_request_.start_time > 1000) {
+  if (millis() - pending_request_.start_time > this->rtu_response_timeout_ms_) {
     ESP_LOGW(TAG, "Modbus timeout: response incomplete.");
     pending_request_.response.clear();
     pending_request_.active = false;
@@ -237,7 +241,7 @@ void ModbusBridgeComponent::poll_uart_response_() {
     return;
   }
 
-  this->set_timeout("modbus_rx_poll", 10, [this]() { poll_uart_response_(); });
+  this->set_timeout("modbus_rx_poll", this->rtu_poll_interval_ms_, [this]() { poll_uart_response_(); });
 }
 
 void ModbusBridgeComponent::append_crc(std::vector<uint8_t> &data) {
