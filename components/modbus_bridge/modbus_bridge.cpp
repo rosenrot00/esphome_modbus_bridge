@@ -127,6 +127,10 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       }
 
       uint16_t len = (buffer[4] << 8) | buffer[5];
+      if (len > buffer.size() - 6) {
+        ESP_LOGW(TAG, "Invalid Modbus length field: %d", len);
+        continue;
+      }
       if (r < 6 + len) continue;
 
       uint8_t uid = buffer[6];
@@ -164,9 +168,9 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
 
 void ModbusBridgeComponent::start_uart_polling_() {
   if (this->polling_active_) return;
-  this->polling_active_ = true;
 
   this->set_timeout("modbus_rx_poll", this->rtu_poll_interval_ms_, [this]() { poll_uart_response_(); });
+  this->polling_active_ = true;
 }
 
 void ModbusBridgeComponent::poll_uart_response_() {
@@ -187,13 +191,17 @@ void ModbusBridgeComponent::poll_uart_response_() {
   if (current_size == 0) {
     if (millis() - pending_request_.start_time > this->rtu_response_timeout_ms_) {
       ESP_LOGW(TAG, "Modbus timeout: no response received (no first byte).");
-      pending_request_.response.clear();
-      pending_request_.active = false;
-      polling_active_ = false;
+      end_pending_request_();
       return;
     }
 
     this->set_timeout("modbus_rx_poll", this->rtu_poll_interval_ms_, [this]() { poll_uart_response_(); });
+    return;
+  }
+
+  if (current_size < 3) {
+    ESP_LOGW(TAG, "Invalid response length: too short");
+    end_pending_request_();
     return;
   }
 
@@ -227,21 +235,23 @@ void ModbusBridgeComponent::poll_uart_response_() {
     }
 
     send(pending_request_.client_fd, tcp_response.data(), tcp_response.size(), 0);
-    pending_request_.response.clear();
-    pending_request_.active = false;
-    polling_active_ = false;
+    end_pending_request_();
     return;
   }
 
   if (millis() - pending_request_.start_time > this->rtu_response_timeout_ms_) {
     ESP_LOGW(TAG, "Modbus timeout: response incomplete.");
-    pending_request_.response.clear();
-    pending_request_.active = false;
-    polling_active_ = false;
+    end_pending_request_();
     return;
   }
 
   this->set_timeout("modbus_rx_poll", this->rtu_poll_interval_ms_, [this]() { poll_uart_response_(); });
+}
+
+void ModbusBridgeComponent::end_pending_request_() {
+  pending_request_.response.clear();
+  pending_request_.active = false;
+  polling_active_ = false;
 }
 
 void ModbusBridgeComponent::append_crc(std::vector<uint8_t> &data) {
