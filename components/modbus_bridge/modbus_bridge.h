@@ -4,7 +4,6 @@
 #include "esphome/components/uart/uart.h"
 #include <vector>
 
-
 namespace esphome {
 namespace modbus_bridge {
 
@@ -56,6 +55,7 @@ class ModbusBridgeComponent : public Component {
   void append_crc(std::vector<uint8_t> &data);
   void initialize_tcp_server_();
   void poll_uart_response_();
+  void end_pending_request_();
   void check_tcp_sockets_();
 };
 
