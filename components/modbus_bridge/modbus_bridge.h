@@ -4,6 +4,7 @@
 #include "esphome/components/uart/uart.h"
 #include <vector>
 
+
 namespace esphome {
 namespace modbus_bridge {
 
@@ -49,6 +50,7 @@ class ModbusBridgeComponent : public Component {
   uint32_t tcp_client_timeout_ms_{60000};
   uint32_t rtu_inactivity_timeout_ms_{20};
   uint32_t rtu_response_timeout_ms_{3000};
+  std::vector<uint8_t> temp_buffer_;
 
   bool polling_active_{false};
   void start_uart_polling_();
