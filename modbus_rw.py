@@ -45,9 +45,13 @@ def main():
             print(f"Error reading register: {result}")
         else:
             logging.debug(f"Raw register data: {result.registers}")
-            decoder = BinaryPayloadDecoder.fromRegisters(result.registers, byteorder=Endian.BIG)
-            raw_hex = ' '.join(f'{byte:02X}' for byte in decoder.decode_string(len(result.registers) * 2))
-            print(f"Data ({args.count} registers):\n{raw_hex}")
+            try:
+                # Manual conversion of registers to bytes (big-endian)
+                byte_data = b''.join(reg.to_bytes(2, byteorder='big') for reg in result.registers)
+                raw_hex = ' '.join(f'{byte:02X}' for byte in byte_data)
+                print(f"Data ({args.count} registers):\n{raw_hex}")
+            except Exception as e:
+                print(f"Error decoding register data: {e}")
 
     client.close()
 
