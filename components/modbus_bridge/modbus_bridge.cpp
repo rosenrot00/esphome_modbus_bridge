@@ -1,14 +1,14 @@
 #include "modbus_bridge.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
+#include "esphome/core/application.h"
+#include "esphome/components/network/util.h"
 #include <lwip/sockets.h>
 #include <fcntl.h>
 #include <cmath>
 
-
 namespace esphome {
 namespace modbus_bridge {
-
 
 static const char *const TAG = "modbus_bridge";
 
@@ -19,8 +19,15 @@ void ModbusBridgeComponent::set_rtu_response_timeout(uint32_t timeout) {
 }
 
 void ModbusBridgeComponent::setup() {
-  this->set_timeout("modbus_bridge_setup", 5000, [this]() {
-    this->initialize_tcp_server_();
+  this->set_interval("tcp_server_and_network_check", 1000, [this]() {
+    if (this->sock_ < 0 && network::is_connected()) {
+      ESP_LOGI(TAG, "IP available – initializing TCP server");
+      this->initialize_tcp_server_();
+    } else if (this->sock_ >= 0 && !network::is_connected()) {
+      ESP_LOGW(TAG, "Lost network IP – closing TCP server");
+      close(this->sock_);
+      this->sock_ = -1;
+    }
   });
 
   this->set_interval("tcp_poll", this->tcp_poll_interval_ms_, [this]() {
@@ -267,12 +274,10 @@ void ModbusBridgeComponent::append_crc(std::vector<uint8_t> &data) {
   data.push_back((crc >> 8) & 0xFF);
 }
 
-
 void ModbusBridgeComponent::set_debug(bool debug) {
   this->debug_ = debug;
   ESP_LOGI(TAG, "Debug mode %s", debug ? "enabled" : "disabled");
 }
-
 
 }  // namespace modbus_bridge
 }  // namespace esphome
