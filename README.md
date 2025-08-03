@@ -52,6 +52,7 @@ uart:
   rx_pin: GPIO16
   baud_rate: 9600
   stop_bits: 1
+  rx_buffer_size: 256         #increase in case more than 256 bytes long modbus messages are expected
 
 modbus_bridge:
   id: mb_bridge
