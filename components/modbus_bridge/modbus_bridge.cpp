@@ -35,6 +35,7 @@ void ModbusBridgeComponent::setup() {
   });
 
   this->rtu_inactivity_timeout_ms_ = static_cast<uint32_t>(std::ceil((10000.0 / this->uart_->get_baud_rate()) * 3.5 + 1));
+  this->temp_buffer_.resize(this->uart_->get_rx_buffer_size() + 6);
   this->rtu_poll_interval_ms_ = this->rtu_inactivity_timeout_ms_ + 2;
   this->polling_active_ = false;
   if (this->rtu_response_timeout_ms_ == 0) {
@@ -97,22 +98,26 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
     int newfd = accept(this->sock_, NULL, NULL);
     if (newfd >= 0) {
       fcntl(newfd, F_SETFL, O_NONBLOCK);
+      bool accepted = false;
       for (auto &c : this->clients_) {
         if (c.fd < 0) {
           c.fd = newfd;
           c.last_activity = millis();
           ESP_LOGI(TAG, "Client connected: %d", newfd);
+          accepted = true;
           break;
         }
+      }
+      if (!accepted) {
+        ESP_LOGW(TAG, "No slot for new client, closing fd %d", newfd);
+        close(newfd);
       }
     }
   }
 
   for (auto &c : this->clients_) {
     if (c.fd >= 0 && FD_ISSET(c.fd, &read_fds)) {
-      size_t max_buffer = this->uart_->get_rx_buffer_size() + 6;
-      std::vector<uint8_t> buffer(max_buffer);
-      int r = recv(c.fd, buffer.data(), buffer.size(), 0);
+      int r = recv(c.fd, this->temp_buffer_.data(), this->temp_buffer_.size(), 0);
       if (r == 0) {
         //ESP_LOGW(TAG, "Client %d recv == 0 (no data), keeping connection", c.fd);
         ESP_LOGI(TAG, "Client %d disconnected cleanly", c.fd);
@@ -133,17 +138,17 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
         continue;
       }
 
-      uint16_t len = (buffer[4] << 8) | buffer[5];
-      if (len > buffer.size() - 6) {
+      uint16_t len = (this->temp_buffer_[4] << 8) | this->temp_buffer_[5];
+      if (len > this->temp_buffer_.size() - 6) {
         ESP_LOGW(TAG, "Invalid Modbus length field: %d", len);
         continue;
       }
       if (r < 6 + len) continue;
 
-      uint8_t uid = buffer[6];
+      uint8_t uid = this->temp_buffer_[6];
       std::vector<uint8_t> rtu;
       rtu.push_back(uid);
-      rtu.insert(rtu.end(), buffer.begin() + 7, buffer.begin() + 6 + len);
+      rtu.insert(rtu.end(), this->temp_buffer_.begin() + 7, this->temp_buffer_.begin() + 6 + len);
       append_crc(rtu);
 
       if (this->debug_) {
@@ -158,7 +163,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       this->uart_->flush();
       this->uart_->write_array(rtu);
       pending_request_.client_fd = c.fd;
-      memcpy(pending_request_.header, buffer.data(), 7);
+      memcpy(pending_request_.header, this->temp_buffer_.data(), 7);
       pending_request_.response.clear();
       pending_request_.response.reserve(this->uart_->get_rx_buffer_size());
       pending_request_.active = true;
@@ -256,7 +261,12 @@ void ModbusBridgeComponent::poll_uart_response_() {
 }
 
 void ModbusBridgeComponent::end_pending_request_() {
-  pending_request_.response.clear();
+  if (pending_request_.response.capacity() > this->uart_->get_rx_buffer_size()) {
+    std::vector<uint8_t>().swap(pending_request_.response);
+    pending_request_.response.reserve(this->uart_->get_rx_buffer_size());
+  } else {
+    pending_request_.response.clear();
+  }
   pending_request_.active = false;
   polling_active_ = false;
 }
