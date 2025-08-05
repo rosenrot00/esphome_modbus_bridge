@@ -16,6 +16,14 @@
 namespace esphome {
 namespace modbus_bridge {
 
+#ifdef USE_ESP8266
+struct TCPClient8266 {
+  WiFiClient socket;
+  uint32_t last_activity = 0;
+  int id = -1;  // New field to track client ID/index
+};
+#endif
+
 #ifdef USE_ESP32
 struct TCPClient {
   int fd = -1;
@@ -24,7 +32,7 @@ struct TCPClient {
 #endif
 
 struct PendingRequest {
-  int client_fd;
+  int client_fd;  // Used as an identifier for the client on both ESP32 and ESP8266
   uint8_t header[7];
   std::vector<uint8_t> response;
   bool active = false;
@@ -55,7 +63,7 @@ class ModbusBridgeComponent : public Component {
   TCPClient clients_[4];
 #elif defined(USE_ESP8266)
   WiFiServer server_{502};
-  std::vector<WiFiClient> clients_;
+  std::vector<TCPClient8266> clients_;
 #endif
   PendingRequest pending_request_;
   uint16_t tcp_port_{502};
@@ -73,8 +81,8 @@ class ModbusBridgeComponent : public Component {
   void initialize_tcp_server_();
   void poll_uart_response_();
   void end_pending_request_();
-  void check_tcp_sockets_esp32_();
-  void check_tcp_sockets_esp8266_();
+  void check_tcp_sockets_();
+  void handle_tcp_payload(const uint8_t *data, size_t len, int client_fd);
 };
 
 }  // namespace modbus_bridge
