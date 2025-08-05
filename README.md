@@ -45,7 +45,6 @@ esp32:
   framework:
     type: esp-idf
     #type: arduino            #should work as well
-  #cpu_frequency: 80MHz
 
 #esp8266:
 #  board: nodemcuv2
