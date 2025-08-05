@@ -7,6 +7,7 @@
 #include <functional>
 #include <initializer_list>
 #include <cstring>
+#include <deque>
 
 #ifdef USE_ESP8266
 #include <ESP8266WiFi.h>
@@ -35,10 +36,9 @@ struct PendingRequest {
   int client_fd;  // Used as an identifier for the client on both ESP32 and ESP8266
   uint8_t header[7];
   std::vector<uint8_t> response;
-  bool active = false;
   uint32_t start_time = 0;
-  size_t last_size = 0;
   uint32_t last_change = 0;
+  std::vector<uint8_t> rtu_data;
 };
 
 class ModbusBridgeComponent;  // Forward declaration
@@ -65,7 +65,7 @@ class ModbusBridgeComponent : public Component {
   WiFiServer server_{502};
   std::vector<TCPClient8266> clients_;
 #endif
-  PendingRequest pending_request_;
+  std::deque<PendingRequest> pending_requests_;
   uint16_t tcp_port_{502};
   bool debug_{false};
   uint32_t tcp_poll_interval_ms_{50};
