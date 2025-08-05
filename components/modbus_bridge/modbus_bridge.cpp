@@ -72,7 +72,7 @@ void ModbusBridgeComponent::initialize_tcp_server_() {
   this->server_ = WiFiServer(this->tcp_port_);
   this->server_.begin();
   this->sock_ = 1;  // Dummywert für „Server läuft“
-  ESP_LOGI(TAG, "ESP8266: TCP server started");
+  ESP_LOGI(TAG, "TCP server started on %s:%d", WiFi.localIP().toString().c_str(), this->tcp_port_);
 #elif defined(USE_ESP32)
   this->sock_ = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
   if (this->sock_ < 0) {
@@ -90,7 +90,7 @@ void ModbusBridgeComponent::initialize_tcp_server_() {
   bind(this->sock_, (struct sockaddr *)&server_addr, sizeof(server_addr));
   listen(this->sock_, 4);
 
-  ESP_LOGI(TAG, "ESP32: Listening on port %d", this->tcp_port_);
+  ESP_LOGI(TAG, "TCP server started on %s:%d", network::get_ip_address().str().c_str(), this->tcp_port_);
 
   for (auto &c : this->clients_) c.fd = -1;
   pending_request_.active = false;
@@ -149,10 +149,10 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       client.socket.setTimeout(10);
       client.last_activity = millis();
       this->clients_.push_back(client);
-      ESP_LOGI(TAG, "New client connected");
+      ESP_LOGI(TAG, "New TCP client connected from %s (id: %d)", new_client.remoteIP().toString().c_str(), static_cast<int>(this->clients_.size() - 1));
     } else {
       new_client.stop();
-      ESP_LOGW(TAG, "Max clients reached");
+      ESP_LOGW(TAG, "No slot for new TCP client, closing fd %d", static_cast<int>(this->clients_.size() - 1));
     }
   }
 
@@ -164,7 +164,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
     }
 
     if (millis() - it->last_activity > this->tcp_client_timeout_ms_) {
-      ESP_LOGW(TAG, "ESP8266: Client timeout – closing connection");
+      ESP_LOGW(TAG, "TCP client timeout – closing connection");
       it->socket.stop();
       it = this->clients_.erase(it);
       continue;
@@ -181,7 +181,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
 
     ++it;
   }
-#elif defined(USE_ESP32)
+ #elif defined(USE_ESP32)
   if (this->sock_ < 0 || pending_request_.active) return;
 
   fd_set read_fds;
@@ -194,7 +194,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
   for (auto &c : this->clients_) {
     if (c.fd >= 0) {
       if (now - c.last_activity > this->tcp_client_timeout_ms_) {
-        ESP_LOGW(TAG, "Client timeout: closing fd %d", c.fd);
+        ESP_LOGW(TAG, "TCP client timeout: closing fd %d", c.fd);
         close(c.fd);
         c.fd = -1;
         continue;
@@ -217,13 +217,13 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
         if (c.fd < 0) {
           c.fd = newfd;
           c.last_activity = millis();
-          ESP_LOGI(TAG, "Client connected: %d", newfd);
+          ESP_LOGI(TAG, "New TCP client connected from fd %d", newfd);
           accepted = true;
           break;
         }
       }
       if (!accepted) {
-        ESP_LOGW(TAG, "No slot for new client, closing fd %d", newfd);
+        ESP_LOGW(TAG, "No slot for new TCP client, closing fd %d", newfd);
         close(newfd);
       }
     }
@@ -233,14 +233,14 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
     if (c.fd >= 0 && FD_ISSET(c.fd, &read_fds)) {
       int r = recv(c.fd, this->temp_buffer_.data(), this->temp_buffer_.size(), 0);
       if (r == 0) {
-        ESP_LOGI(TAG, "Client %d disconnected cleanly", c.fd);
+        ESP_LOGI(TAG, "TCP client %d disconnected cleanly", c.fd);
         close(c.fd);
         c.fd = -1;
         continue;
       }
       if (r < 0) {
         if (errno != EWOULDBLOCK && errno != EAGAIN) {
-          ESP_LOGW(TAG, "Client %d socket error: %s", c.fd, strerror(errno));
+          ESP_LOGW(TAG, "TCP client %d socket error: %s", c.fd, strerror(errno));
           close(c.fd);
           c.fd = -1;
         }
