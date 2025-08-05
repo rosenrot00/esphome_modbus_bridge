@@ -35,41 +35,45 @@ void ModbusBridgeComponent::set_rtu_response_timeout(uint32_t timeout) {
 }
 
 void ModbusBridgeComponent::setup() {
-#if defined(USE_ESP8266)
-  this->server_ = WiFiServer(this->tcp_port_);
-  this->server_.begin();
-  this->set_interval("tcp_poll", this->tcp_poll_interval_ms_, [this]() {
-    this->check_tcp_sockets_esp8266_();
-  });
-#elif defined(USE_ESP32)
+  this->sock_ = -1;
+
   this->set_interval("tcp_server_and_network_check", 1000, [this]() {
     if (this->sock_ < 0 && network::is_connected()) {
       ESP_LOGI(TAG, "IP available – initializing TCP server");
       this->initialize_tcp_server_();
     } else if (this->sock_ >= 0 && !network::is_connected()) {
       ESP_LOGW(TAG, "Lost network IP – closing TCP server");
+#if defined(USE_ESP8266)
+      this->server_.stop();
+#elif defined(USE_ESP32)
       close(this->sock_);
+#endif
       this->sock_ = -1;
     }
   });
 
   this->set_interval("tcp_poll", this->tcp_poll_interval_ms_, [this]() {
-    this->check_tcp_sockets_esp32_();
+    this->check_tcp_sockets_();
   });
-#endif
 
   this->rtu_inactivity_timeout_ms_ = static_cast<uint32_t>(std::ceil((10000.0 / this->uart_->get_baud_rate()) * 3.5 + 1));
   this->temp_buffer_.resize(this->uart_->get_rx_buffer_size() + 6);
   this->rtu_poll_interval_ms_ = this->rtu_inactivity_timeout_ms_ + 2;
   this->polling_active_ = false;
   if (this->rtu_response_timeout_ms_ == 0) {
-    ESP_LOGW(TAG, "RTU response timeout not set via YAML – falling back to 100 ms.");
+    ESP_LOGW(TAG, "RTU response timeout set to 0 – falling back to 100 ms.");
     this->rtu_response_timeout_ms_ = 100;
   }
 }
 
-#ifdef USE_ESP32
+
 void ModbusBridgeComponent::initialize_tcp_server_() {
+#if defined(USE_ESP8266)
+  this->server_ = WiFiServer(this->tcp_port_);
+  this->server_.begin();
+  this->sock_ = 1;  // Dummywert für „Server läuft“
+  ESP_LOGI(TAG, "ESP8266: TCP server started");
+#elif defined(USE_ESP32)
   this->sock_ = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
   if (this->sock_ < 0) {
     ESP_LOGE(TAG, "Socket creation failed");
@@ -86,15 +90,98 @@ void ModbusBridgeComponent::initialize_tcp_server_() {
   bind(this->sock_, (struct sockaddr *)&server_addr, sizeof(server_addr));
   listen(this->sock_, 4);
 
-  ESP_LOGI(TAG, "Listening on port %d", this->tcp_port_);
+  ESP_LOGI(TAG, "ESP32: Listening on port %d", this->tcp_port_);
 
   for (auto &c : this->clients_) c.fd = -1;
   pending_request_.active = false;
-}
 #endif
+}
 
-#ifdef USE_ESP32
-void ModbusBridgeComponent::check_tcp_sockets_esp32_() {
+void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, int client_fd) {
+  if (len < 7) {
+    ESP_LOGW(TAG, "Received too-short frame (%d bytes)", (int)len);
+    return;
+  }
+
+  uint16_t modbus_len = (data[4] << 8) | data[5];
+  if (modbus_len > this->temp_buffer_.size() - 6) {
+    ESP_LOGW(TAG, "Invalid Modbus length field: %d", modbus_len);
+    return;
+  }
+  if (len < 6 + modbus_len) return;
+
+  uint8_t uid = data[6];
+  std::vector<uint8_t> rtu;
+  rtu.push_back(uid);
+  rtu.insert(rtu.end(), data + 7, data + 6 + modbus_len);
+  append_crc(rtu);
+
+  if (this->debug_) {
+    ESP_LOGD(TAG, "TCP->RTU UID: %d, FC: 0x%02X, LEN: %d", uid, rtu[1], modbus_len);
+    char buf[rtu.size() * 3 + 1];
+    char *ptr = buf;
+    for (auto b : rtu) ptr += sprintf(ptr, "%02X ", b);
+    *ptr = 0;
+    ESP_LOGD(TAG, "RTU send: %s", buf);
+  }
+
+  this->uart_->flush();
+  this->uart_->write_array(rtu);
+  pending_request_.client_fd = client_fd;
+  memcpy(pending_request_.header, data, 7);
+  pending_request_.response.clear();
+  pending_request_.response.reserve(this->uart_->get_rx_buffer_size());
+  pending_request_.active = true;
+  pending_request_.start_time = millis();
+  pending_request_.last_size = 0;
+  pending_request_.last_change = millis();
+
+  this->start_uart_polling_();
+}
+
+void ModbusBridgeComponent::check_tcp_sockets_() {
+#if defined(USE_ESP8266)
+  WiFiClient new_client = this->server_.accept();
+  if (new_client) {
+    if (this->clients_.size() < 4) {
+      TCPClient8266 client;
+      client.socket = new_client;
+      client.socket.setTimeout(10);
+      client.last_activity = millis();
+      this->clients_.push_back(client);
+      ESP_LOGI(TAG, "New client connected");
+    } else {
+      new_client.stop();
+      ESP_LOGW(TAG, "Max clients reached");
+    }
+  }
+
+  for (auto it = this->clients_.begin(); it != this->clients_.end(); ) {
+    if (!it->socket.connected()) {
+      it->socket.stop();
+      it = this->clients_.erase(it);
+      continue;
+    }
+
+    if (millis() - it->last_activity > this->tcp_client_timeout_ms_) {
+      ESP_LOGW(TAG, "ESP8266: Client timeout – closing connection");
+      it->socket.stop();
+      it = this->clients_.erase(it);
+      continue;
+    }
+
+    if (it->socket.available() >= 7) {
+      int r = it->socket.readBytes(this->temp_buffer_.data(), this->temp_buffer_.size());
+
+      // Weiterverarbeitung (gemeinsamer Parsing-Teil)
+      int client_fd = static_cast<int>(std::distance(this->clients_.begin(), it));
+      handle_tcp_payload(reinterpret_cast<const uint8_t *>(this->temp_buffer_.data()), r, client_fd);
+      it->last_activity = millis();
+    }
+
+    ++it;
+  }
+#elif defined(USE_ESP32)
   if (this->sock_ < 0 || pending_request_.active) return;
 
   fd_set read_fds;
@@ -146,7 +233,6 @@ void ModbusBridgeComponent::check_tcp_sockets_esp32_() {
     if (c.fd >= 0 && FD_ISSET(c.fd, &read_fds)) {
       int r = recv(c.fd, this->temp_buffer_.data(), this->temp_buffer_.size(), 0);
       if (r == 0) {
-        //ESP_LOGW(TAG, "Client %d recv == 0 (no data), keeping connection", c.fd);
         ESP_LOGI(TAG, "Client %d disconnected cleanly", c.fd);
         close(c.fd);
         c.fd = -1;
@@ -160,82 +246,14 @@ void ModbusBridgeComponent::check_tcp_sockets_esp32_() {
         }
         continue;
       }
-      if (r < 7) {
-        ESP_LOGW(TAG, "Received too-short frame (%d bytes) from fd %d", r, c.fd);
-        continue;
+      if (r >= 7) {
+        handle_tcp_payload(reinterpret_cast<const uint8_t *>(this->temp_buffer_.data()), r, c.fd);
+        c.last_activity = now;
       }
-
-      uint16_t len = (this->temp_buffer_[4] << 8) | this->temp_buffer_[5];
-      if (len > this->temp_buffer_.size() - 6) {
-        ESP_LOGW(TAG, "Invalid Modbus length field: %d", len);
-        continue;
-      }
-      if (r < 6 + len) continue;
-
-      uint8_t uid = this->temp_buffer_[6];
-      std::vector<uint8_t> rtu;
-      rtu.push_back(uid);
-      rtu.insert(rtu.end(), this->temp_buffer_.begin() + 7, this->temp_buffer_.begin() + 6 + len);
-      append_crc(rtu);
-
-      if (this->debug_) {
-        ESP_LOGD(TAG, "TCP->RTU UID: %d, FC: 0x%02X, LEN: %d", uid, rtu[1], len);
-        char buf[rtu.size() * 3 + 1];
-        char *ptr = buf;
-        for (auto b : rtu) ptr += sprintf(ptr, "%02X ", b);
-        *ptr = 0;
-        ESP_LOGD(TAG, "RTU send: %s", buf);
-      }
-      
-      this->uart_->flush();
-      this->uart_->write_array(rtu);
-      pending_request_.client_fd = c.fd;
-      memcpy(pending_request_.header, this->temp_buffer_.data(), 7);
-      pending_request_.response.clear();
-      pending_request_.response.reserve(this->uart_->get_rx_buffer_size());
-      pending_request_.active = true;
-      pending_request_.start_time = millis();
-      pending_request_.last_size = 0;
-      pending_request_.last_change = millis();
-
-      this->start_uart_polling_();
-      c.last_activity = now;
-      break;
     }
   }
-}
 #endif
-
-#ifdef USE_ESP8266
-void ModbusBridgeComponent::check_tcp_sockets_esp8266_() {
-  WiFiClient new_client = this->server_.accept();
-  if (new_client) {
-    if (this->clients_.size() < 4) {
-      new_client.setTimeout(10);
-      this->clients_.push_back(new_client);
-      ESP_LOGI(TAG, "New client connected");
-    } else {
-      new_client.stop();
-      ESP_LOGW(TAG, "Max clients reached");
-    }
-  }
-
-  for (auto it = this->clients_.begin(); it != this->clients_.end(); ) {
-    if (!it->connected()) {
-      it->stop();
-      it = this->clients_.erase(it);
-      continue;
-    }
-
-    if (it->available() >= 7) {
-      int r = it->readBytes(this->temp_buffer_.data(), this->temp_buffer_.size());
-      // Optional: hier gemeinsame Parse-/Handling-Logik extrahieren
-    }
-
-    ++it;
-  }
 }
-#endif
 
 void ModbusBridgeComponent::start_uart_polling_() {
   if (this->polling_active_) return;
@@ -307,10 +325,10 @@ void ModbusBridgeComponent::poll_uart_response_() {
 
     // Plattform-spezifischer TCP-Response
 #ifdef USE_ESP8266
-    for (auto &client : this->clients_) {
-      if (client.connected()) {
-        client.write(tcp_response.data(), tcp_response.size());
-        break;
+    if (pending_request_.client_fd >= 0 && pending_request_.client_fd < static_cast<int>(this->clients_.size())) {
+      auto &client = this->clients_[pending_request_.client_fd];
+      if (client.socket.connected()) {
+        client.socket.write(tcp_response.data(), tcp_response.size());
       }
     }
 #elif defined(USE_ESP32)
