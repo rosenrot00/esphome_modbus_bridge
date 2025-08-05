@@ -206,7 +206,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
     ++it;
   }
  #elif defined(USE_ESP32)
-  if (this->sock_ < 0 || pending_request_.active) return;
+  if (this->sock_ < 0 || this->pending_requests_.empty() == false) return;
 
   fd_set read_fds;
   FD_ZERO(&read_fds);
