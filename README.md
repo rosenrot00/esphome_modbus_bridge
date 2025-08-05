@@ -1,6 +1,6 @@
-# ESPHome Modbus TCP to RTU Bridge
+# ESPHome (ESP8266/ESP32) Modbus TCP to RTU Bridge
 
-This ESPHome component implements a transparent Modbus TCP to Modbus RTU bridge that acts as a Modbus RTU master over UART. It allows multiple Modbus TCP clients to communicate with Modbus RTU slaves via RS485 or other UART-compatible hardware.
+This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting as a Modbus RTU master over UART on both ESP8266 and ESP32 platforms. It allows multiple Modbus TCP clients to communicate with Modbus RTU slaves via RS485 or other UART-compatible hardware.
 
 #### Protocol Overview
 
@@ -40,6 +40,16 @@ The response will match the Modbus TCP format and contain the same transaction I
 #### ESPHome Configuration Example
 
 ```yaml
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    #type: arduino            #should work as well
+  #cpu_frequency: 80MHz
+
+#esp8266:
+#  board: nodemcuv2
+
 external_components:
   - source:
       type: git
