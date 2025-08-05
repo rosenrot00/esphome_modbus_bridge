@@ -1,4 +1,3 @@
-
 #include <vector>
 #include <memory>
 #include <functional>
@@ -6,12 +5,17 @@
 #include <cstring>
 #include <cmath>
 
-#ifdef USE_ESP8266
-#include <ESP8266WiFi.h>
-#elif defined(USE_ESP32)
+#ifdef USE_ARDUINO
+#include <Arduino.h>
+#include "IPAddress.h"
+#endif
+
+
+#ifdef USE_ESP32
 #include <lwip/sockets.h>
 #include <fcntl.h>
 #endif
+
 #include "modbus_bridge.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
