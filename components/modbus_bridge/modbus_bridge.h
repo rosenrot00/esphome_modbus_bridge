@@ -3,15 +3,25 @@
 #include "esphome/core/component.h"
 #include "esphome/components/uart/uart.h"
 #include <vector>
+#include <memory>
+#include <functional>
+#include <initializer_list>
+#include <cstring>
+
+#ifdef USE_ESP8266
+#include <ESP8266WiFi.h>
+#endif
 
 
 namespace esphome {
 namespace modbus_bridge {
 
+#ifdef USE_ESP32
 struct TCPClient {
   int fd = -1;
   uint32_t last_activity = 0;
 };
+#endif
 
 struct PendingRequest {
   int client_fd;
@@ -41,7 +51,12 @@ class ModbusBridgeComponent : public Component {
  protected:
   uart::UARTComponent *uart_{nullptr};
   int sock_{-1};
+#ifdef USE_ESP32
   TCPClient clients_[4];
+#elif defined(USE_ESP8266)
+  WiFiServer server_{502};
+  std::vector<WiFiClient> clients_;
+#endif
   PendingRequest pending_request_;
   uint16_t tcp_port_{502};
   bool debug_{false};
@@ -58,7 +73,8 @@ class ModbusBridgeComponent : public Component {
   void initialize_tcp_server_();
   void poll_uart_response_();
   void end_pending_request_();
-  void check_tcp_sockets_();
+  void check_tcp_sockets_esp32_();
+  void check_tcp_sockets_esp8266_();
 };
 
 }  // namespace modbus_bridge
