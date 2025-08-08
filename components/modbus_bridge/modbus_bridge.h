@@ -21,7 +21,8 @@ namespace modbus_bridge {
 struct TCPClient8266 {
   WiFiClient socket;
   uint32_t last_activity = 0;
-  int id = -1;  // New field to track client ID/index
+  int id = -1;                 // slot index used as client_id
+  bool disconnect_notified = false;  // suppress repeated disconnect logs
 };
 #endif
 
@@ -33,12 +34,18 @@ struct TCPClient {
 #endif
 
 struct PendingRequest {
+  // TCP-side identification
   int client_fd;  // Used as an identifier for the client on both ESP32 and ESP8266
+
+  // Payload data
   uint8_t header[7];
   std::vector<uint8_t> response;
+  std::vector<uint8_t> rtu_data;
+
+  // Timing
   uint32_t start_time = 0;
   uint32_t last_change = 0;
-  std::vector<uint8_t> rtu_data;
+  size_t last_size = 0;  // tracks last observed response size to reset inactivity timer
 };
 
 class ModbusBridgeComponent;  // Forward declaration
@@ -83,6 +90,7 @@ class ModbusBridgeComponent : public Component {
   void end_pending_request_();
   void check_tcp_sockets_();
   void handle_tcp_payload(const uint8_t *data, size_t len, int client_fd);
+  void send_to_client_(int slot, const uint8_t *data, size_t len);
 };
 
 }  // namespace modbus_bridge
