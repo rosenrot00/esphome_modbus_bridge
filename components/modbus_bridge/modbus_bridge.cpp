@@ -44,7 +44,7 @@ static const char *const TAG = "modbus_bridge";
 #endif
 
 #if defined(USE_ESP8266)
-static constexpr size_t MAX_TCP_CLIENTS = 2;  // leaner on RAM for ESP8266
+static constexpr size_t MAX_TCP_CLIENTS = 4;
 #else
 static constexpr size_t MAX_TCP_CLIENTS = 4;
 #endif
