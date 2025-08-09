@@ -60,14 +60,15 @@ class ModbusBridgeComponent : public Component {
   void set_tcp_client_timeout(uint32_t timeout_ms) { tcp_client_timeout_ms_ = timeout_ms; }
   void set_rtu_response_timeout(uint32_t timeout);
   void set_debug(bool debug);
+  void set_tcp_allowed_clients(uint8_t allowed) { tcp_allowed_clients_ = allowed; }
 
   void setup() override;
 
- protected:
+protected:
   uart::UARTComponent *uart_{nullptr};
   int sock_{-1};
 #ifdef USE_ESP32
-  TCPClient clients_[4];
+  std::vector<TCPClient> clients_;
 #elif defined(USE_ESP8266)
   WiFiServer server_{502};
   std::vector<TCPClient8266> clients_;
@@ -81,13 +82,13 @@ class ModbusBridgeComponent : public Component {
   uint32_t rtu_inactivity_timeout_ms_{20};
   uint32_t rtu_response_timeout_ms_{3000};
   std::vector<uint8_t> temp_buffer_;
+  uint8_t tcp_allowed_clients_{4};
 
   bool polling_active_{false};
   void start_uart_polling_();
   void append_crc(std::vector<uint8_t> &data);
   void initialize_tcp_server_();
   void poll_uart_response_();
-  void end_pending_request_();
   void check_tcp_sockets_();
   void handle_tcp_payload(const uint8_t *data, size_t len, int client_fd);
   void send_to_client_(int slot, const uint8_t *data, size_t len);
