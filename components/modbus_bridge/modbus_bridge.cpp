@@ -4,7 +4,7 @@
 #include <initializer_list>
 #include <cstring>
 #include <cmath>
-#include <array>
+#include <algorithm>
 
 #ifdef USE_ARDUINO
 #include <Arduino.h>
@@ -29,25 +29,13 @@ namespace modbus_bridge {
 
 static const char *const TAG = "modbus_bridge";
 
-// Tunables (override via -D flags if needed)
-#ifndef MODBUS_BRIDGE_MAX_PENDING_REQUESTS
-#define MODBUS_BRIDGE_MAX_PENDING_REQUESTS 32
-#endif
-#ifndef MODBUS_BRIDGE_TCP_ACCU_CAP
-#define MODBUS_BRIDGE_TCP_ACCU_CAP 1024
-#endif
-#ifndef MODBUS_BRIDGE_TCP_ACCU_CAP_8266
-#define MODBUS_BRIDGE_TCP_ACCU_CAP_8266 1024
-#endif
-#ifndef MODBUS_BRIDGE_MAX_FRAMES_PER_LOOP
-#define MODBUS_BRIDGE_MAX_FRAMES_PER_LOOP 8
-#endif
-
-#if defined(USE_ESP8266)
-static constexpr size_t MAX_TCP_CLIENTS = 4;
-#else
-static constexpr size_t MAX_TCP_CLIENTS = 4;
-#endif
+// Runtime-configurable (no build flags needed)
+static constexpr size_t kMaxPendingRequests   = 32;
+static constexpr size_t kTcpAccuCap           = 1024;
+static constexpr size_t kTcpAccuCap8266       = 1024;
+static constexpr size_t kMaxFramesPerLoop     = 8;
+// Runtime toggle: preempt oldest same-IP connection when full
+static bool kPreemptSameIP = true;  // auf false setzen, um zu deaktivieren
 
 // Lightweight runtime counters (file-scope, assume single instance)
 
@@ -57,6 +45,8 @@ static uint32_t g_drops_pid = 0;
 static uint32_t g_drops_len = 0;
 static uint32_t g_timeouts = 0;
 static uint32_t g_clients_connected = 0;
+static uint32_t g_noslot_events = 0;   // number of times a new client was rejected due to no free slot
+static uint32_t g_preempt_events = 0;  // number of times we preempted an existing same-IP client (if enabled)
 
 // --- Helpers to reduce duplication ---------------------------------------------------------
 
@@ -105,7 +95,7 @@ void ModbusBridgeComponent::send_to_client_(int slot, const uint8_t *data, size_
     }
   }
 #elif defined(USE_ESP32)
-  if (slot >= 0 && slot < (int)MAX_TCP_CLIENTS) {
+  if (slot >= 0 && slot < (int)this->clients_.size()) {
     int fd = this->clients_[slot].fd;
     if (fd >= 0) {
       send(fd, data, len, 0);
@@ -118,7 +108,7 @@ void ModbusBridgeComponent::send_to_client_(int slot, const uint8_t *data, size_
 static inline void process_accu(std::vector<uint8_t> &accu, int client_slot, const FrameHandler &on_frame) {
   int processed = 0;
   while (accu.size() >= 7) {
-    if (processed++ >= MODBUS_BRIDGE_MAX_FRAMES_PER_LOOP) break;
+    if (processed++ >= (int)kMaxFramesPerLoop) break;
     const uint8_t *buf = accu.data();
     uint16_t len_field = static_cast<uint16_t>((buf[4] << 8) | buf[5]);
     size_t frame_len = 6UL + static_cast<size_t>(len_field); // MBAP(6) + LEN (UID+PDU)
@@ -198,10 +188,11 @@ void ModbusBridgeComponent::setup() {
     for (auto &cl : this->clients_) if (cl.fd >= 0) clients_active++;
   #endif
     ESP_LOGD(TAG,
-            "stats: in=%u out=%u drops(pid)=%u drops(len)=%u timeouts=%u clients_active=%u clients_total=%u",
+            "stats: in=%u out=%u drops(pid)=%u drops(len)=%u timeouts=%u clients_active=%u clients_total=%u noslot=%u preempt=%u",
             (unsigned)g_frames_in, (unsigned)g_frames_out, (unsigned)g_drops_pid,
             (unsigned)g_drops_len, (unsigned)g_timeouts,
-            (unsigned)clients_active, (unsigned)g_clients_connected);
+            (unsigned)clients_active, (unsigned)g_clients_connected,
+            (unsigned)g_noslot_events, (unsigned)g_preempt_events);
   });
 }
 
@@ -229,7 +220,12 @@ void ModbusBridgeComponent::initialize_tcp_server_() {
   server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
   bind(this->sock_, (struct sockaddr *)&server_addr, sizeof(server_addr));
-  listen(this->sock_, MAX_TCP_CLIENTS);
+  int backlog = static_cast<int>(this->tcp_allowed_clients_);
+  listen(this->sock_, backlog);
+
+  // Size clients_ vector to allowed clients and reset fds
+  this->clients_.assign(this->tcp_allowed_clients_, TCPClient{});
+  for (auto &c : this->clients_) c.fd = -1;
 
   auto ips = network::get_ip_addresses();
   if (!ips.empty()) {
@@ -238,13 +234,13 @@ void ModbusBridgeComponent::initialize_tcp_server_() {
     ESP_LOGI(TAG, "TCP server started, but no IP address found");
   }
 
-  for (auto &c : this->clients_) c.fd = -1;
+  // (Removed duplicate fd initialization)
 #endif
 }
 
 void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, int client_fd) {
   // DoS protection: cap pending requests
-  if (this->pending_requests_.size() >= MODBUS_BRIDGE_MAX_PENDING_REQUESTS) {
+  if (this->pending_requests_.size() >= kMaxPendingRequests) {
     ESP_LOGW(TAG, "Pending request queue full (%u), dropping frame", (unsigned)this->pending_requests_.size());
     return;
   }
@@ -332,6 +328,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
     for (auto &v : rx_accu8266) v.clear();
   }
   WiFiClient new_client = this->server_.accept();
+  const size_t allowed_clients = this->tcp_allowed_clients_;
   if (new_client) {
     // Duplicate connection check: same IP and port
     bool duplicate = false;
@@ -339,14 +336,26 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       auto &ex = this->clients_[idx];
       if (!ex.socket.connected()) continue;
       if (ex.socket.remoteIP() == new_client.remoteIP() && ex.socket.remotePort() == new_client.remotePort()) {
-        ESP_LOGW(TAG, "Duplicate connection from %s:%u – closing new client", new_client.remoteIP().toString().c_str(), (unsigned)new_client.remotePort());
-        new_client.stop();
+        // Reuse the existing slot: drop old socket, keep the new one
+        size_t slot_idx = idx;
+        ex.socket.stop();
+        if (slot_idx < rx_accu8266.size()) rx_accu8266[slot_idx].clear();
+        // Purge any pending requests that target this slot
+        for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
+          if (itp->client_fd == (int)slot_idx) itp = this->pending_requests_.erase(itp); else ++itp;
+        }
+        if (this->pending_requests_.empty()) this->polling_active_ = false;
+        ex.socket = new_client;
+        ex.socket.setNoDelay(true);
+        ex.socket.setTimeout(10);
+        ex.last_activity = millis();
+        ex.disconnect_notified = false;
         duplicate = true;
         break;
       }
     }
     if (duplicate) {
-      // skip further processing for this new_client
+      // new_client now installed in the slot; skip further processing
     } else {
       // Ensure accumulator size tracks clients_ size
       if (rx_accu8266.size() < this->clients_.size()) rx_accu8266.resize(this->clients_.size());
@@ -368,9 +377,9 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
           break;
         }
       }
-      // If no free slot, append if under MAX
+      // If no free slot, append if under limit
       if (!placed) {
-        if (this->clients_.size() < MAX_TCP_CLIENTS) {
+        if (this->clients_.size() < allowed_clients) {
           TCPClient8266 client;
           client.socket = new_client;
           client.socket.setNoDelay(true);
@@ -382,8 +391,42 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
           ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d", new_client.remoteIP().toString().c_str(), (unsigned)new_client.remotePort(), (int)(this->clients_.size() - 1));
           g_clients_connected++;
         } else {
-          new_client.stop();
-          ESP_LOGW(TAG, "No slot for new TCP client, closing connection");
+          bool preempted = false;
+          if (kPreemptSameIP) {
+            // find oldest active slot with same IP
+            size_t victim = SIZE_MAX;
+            uint32_t oldest = 0xFFFFFFFFUL;
+            for (size_t i = 0; i < allowed_clients && i < this->clients_.size(); ++i) {
+              auto &cl = this->clients_[i];
+              if (!cl.socket.connected()) continue;
+              if (cl.socket.remoteIP() == new_client.remoteIP()) {
+                if (victim == SIZE_MAX || cl.last_activity < oldest) {
+                  victim = i; oldest = cl.last_activity;
+                }
+              }
+            }
+            if (victim != SIZE_MAX) {
+              // close victim and install new client; purge its pending requests
+              this->clients_[victim].socket.stop();
+              if (victim < rx_accu8266.size()) rx_accu8266[victim].clear();
+              for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
+                if (itp->client_fd == (int)victim) itp = this->pending_requests_.erase(itp); else ++itp;
+              }
+              if (this->pending_requests_.empty()) this->polling_active_ = false;
+              this->clients_[victim].socket = new_client;
+              this->clients_[victim].socket.setNoDelay(true);
+              this->clients_[victim].socket.setTimeout(10);
+              this->clients_[victim].last_activity = millis();
+              this->clients_[victim].disconnect_notified = false;
+              INC(g_preempt_events);
+              //ESP_LOGI(TAG, "TCP preempt same-ip client_id=%u", (unsigned)victim);
+              preempted = true;
+            }
+          }
+          if (!preempted) {
+            INC(g_noslot_events);
+            new_client.stop();
+          }
         }
       }
     } // end duplicate check else
@@ -399,6 +442,11 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       }
       it->socket.stop();
       if (idx < rx_accu8266.size()) rx_accu8266[idx].clear();
+      // Drop any pending requests for this slot
+      for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
+        if (itp->client_fd == (int)idx) itp = this->pending_requests_.erase(itp); else ++itp;
+      }
+      if (this->pending_requests_.empty()) this->polling_active_ = false;
       ++it;
       continue;
     }
@@ -407,8 +455,13 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       size_t idx = static_cast<size_t>(std::distance(this->clients_.begin(), it));
       ESP_LOGW(TAG, "TCP timeout client_id=%u", (unsigned)idx);
       it->socket.stop();
-      it->disconnect_notified = true;  // suppress duplicate disconnect log afterwards
+      it->disconnect_notified = true;
       if (idx < rx_accu8266.size()) rx_accu8266[idx].clear();
+      // Drop any pending requests for this slot
+      for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
+        if (itp->client_fd == (int)idx) itp = this->pending_requests_.erase(itp); else ++itp;
+      }
+      if (this->pending_requests_.empty()) this->polling_active_ = false;
       ++it;
       continue;
     }
@@ -422,7 +475,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       process_accu(rx_accu8266[client_fd], client_fd,
                    [&](const uint8_t *buf, size_t flen, int slot){ handle_tcp_payload(buf, flen, slot); });
       // Cap accumulator size to avoid growth on garbage
-      const size_t kMaxAccu8266 = MODBUS_BRIDGE_TCP_ACCU_CAP_8266;
+      const size_t kMaxAccu8266 = kTcpAccuCap8266;
       if (rx_accu8266[client_fd].size() > kMaxAccu8266) rx_accu8266[client_fd].clear();
       this->clients_[client_fd].disconnect_notified = false; // receiving traffic confirms connection
       it->last_activity = millis();
@@ -430,12 +483,17 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
 
     ++it;
   }
- #elif defined(USE_ESP32)
-  static std::array<std::vector<uint8_t>, MAX_TCP_CLIENTS> rx_accu; // per-client TCP accumulator
+#elif defined(USE_ESP32)
+  static std::vector<std::vector<uint8_t>> rx_accu; // per-client TCP accumulator
   if (this->sock_ < 0) {
     for (auto &v : rx_accu) v.clear();
     return; // keep accepting/reading even when requests are pending
   }
+
+  // Ensure accumulator vector matches clients_ size
+  if (rx_accu.size() != this->clients_.size()) rx_accu.assign(this->clients_.size(), {});
+
+  const size_t allowed_clients = this->tcp_allowed_clients_;
 
   fd_set read_fds;
   FD_ZERO(&read_fds);
@@ -444,12 +502,24 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
 
   uint32_t now = millis();
 
-  for (auto &c : this->clients_) {
+  for (size_t idx = 0; idx < this->clients_.size(); ++idx) {
+    auto &c = this->clients_[idx];
+    if (idx >= allowed_clients) {
+      if (c.fd >= 0) { // over the configured limit → close
+        if (idx < rx_accu.size()) rx_accu[idx].clear();
+        close(c.fd);
+        c.fd = -1;
+      }
+      continue;
+    }
     if (c.fd >= 0) {
       if (now - c.last_activity > this->tcp_client_timeout_ms_) {
-          ESP_LOGW(TAG, "TCP timeout client_id=%zu", (size_t)(&c - &this->clients_[0]));
-        size_t idx_timeout = static_cast<size_t>(&c - &this->clients_[0]);
-        if (idx_timeout < rx_accu.size()) rx_accu[idx_timeout].clear();
+        ESP_LOGW(TAG, "TCP timeout client_id=%zu", idx);
+        if (idx < rx_accu.size()) rx_accu[idx].clear();
+        for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
+          if (itp->client_fd == (int)idx) itp = this->pending_requests_.erase(itp); else ++itp;
+        }
+        if (this->pending_requests_.empty()) this->polling_active_ = false;
         close(c.fd);
         c.fd = -1;
         continue;
@@ -482,63 +552,125 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
         if (getpeername(c.fd, (struct sockaddr *)&existing_addr, &len) == 0) {
           if (existing_addr.sin_addr.s_addr == client_addr.sin_addr.s_addr &&
               existing_addr.sin_port == client_addr.sin_port) {
-            ESP_LOGW(TAG, "Duplicate connection from %s:%d – closing new connection", client_ip, ntohs(client_addr.sin_port));
-            close(newfd);
+            // Reuse the existing slot: replace old fd with new one
+            size_t idx = static_cast<size_t>(&c - &this->clients_[0]);
+            if (idx < rx_accu.size()) rx_accu[idx].clear();
+            // Purge pending requests for this slot to avoid delivering to a new owner
+            for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
+              if (itp->client_fd == (int)idx) itp = this->pending_requests_.erase(itp); else ++itp;
+            }
+            if (this->pending_requests_.empty()) this->polling_active_ = false;
+            close(c.fd);
+            c.fd = newfd;
+            c.last_activity = millis();
             duplicate = true;
             break;
           }
         }
       }
-      if (duplicate)
-        return;
-
-      fcntl(newfd, F_SETFL, O_NONBLOCK);
-      int one = 1;
-      setsockopt(newfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-      // Enable TCP keepalive (helps clean up dead peers)
-      int ka = 1; setsockopt(newfd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
+      if (duplicate) {
+        // We already replaced an existing slot's fd with newfd. Ensure non-blocking and options on the new fd.
+        fcntl(newfd, F_SETFL, O_NONBLOCK);
+        int one = 1; setsockopt(newfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        int ka = 1; setsockopt(newfd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
 #ifdef TCP_KEEPIDLE
-      int idle = 30; setsockopt(newfd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+        int idle = 30; setsockopt(newfd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
 #endif
 #ifdef TCP_KEEPINTVL
-      int intvl = 10; setsockopt(newfd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+        int intvl = 10; setsockopt(newfd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
 #endif
 #ifdef TCP_KEEPCNT
-      int cnt = 3; setsockopt(newfd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+        int cnt = 3; setsockopt(newfd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
 #endif
-      bool accepted = false;
-      for (auto &c : this->clients_) {
-        if (c.fd < 0) {
-          c.fd = newfd;
-          c.last_activity = millis();
-          ESP_LOGI(TAG, "TCP connect %s:%d client_id=%zu", client_ip, ntohs(client_addr.sin_port), (size_t)(&c - &this->clients_[0]));
-          g_clients_connected++;
-          accepted = true;
-          break;
+        // Do not run the normal accept path; skip to read loop this tick
+      } else {
+        fcntl(newfd, F_SETFL, O_NONBLOCK);
+        int one = 1; setsockopt(newfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        int ka = 1; setsockopt(newfd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
+#ifdef TCP_KEEPIDLE
+        int idle = 30; setsockopt(newfd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+#endif
+#ifdef TCP_KEEPINTVL
+        int intvl = 10; setsockopt(newfd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+#endif
+#ifdef TCP_KEEPCNT
+        int cnt = 3; setsockopt(newfd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+#endif
+        bool accepted = false;
+        for (size_t idx = 0; idx < allowed_clients; ++idx) {
+          auto &c = this->clients_[idx];
+          if (c.fd < 0) {
+            c.fd = newfd;
+            c.last_activity = millis();
+            ESP_LOGI(TAG, "TCP connect %s:%d client_id=%zu", client_ip, ntohs(client_addr.sin_port), idx);
+            g_clients_connected++;
+            accepted = true;
+            break;
+          }
         }
-      }
-      if (!accepted) {
-        ESP_LOGW(TAG, "No slot for new TCP client, closing connection");
-        close(newfd);
+        if (!accepted) {
+          bool preempted = false;
+          if (kPreemptSameIP) {
+            size_t victim = SIZE_MAX;
+            uint32_t oldest = 0xFFFFFFFFUL;
+            for (size_t i = 0; i < allowed_clients; ++i) {
+              auto &c = this->clients_[i];
+              if (c.fd < 0) continue;
+              struct sockaddr_in ex; socklen_t l = sizeof(ex);
+              if (getpeername(c.fd, (struct sockaddr*)&ex, &l) == 0) {
+                if (ex.sin_addr.s_addr == client_addr.sin_addr.s_addr) {
+                  if (victim == SIZE_MAX || c.last_activity < oldest) {
+                    victim = i; oldest = c.last_activity;
+                  }
+                }
+              }
+            }
+            if (victim != SIZE_MAX) {
+              if (victim < rx_accu.size()) rx_accu[victim].clear();
+              for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
+                if (itp->client_fd == (int)victim) itp = this->pending_requests_.erase(itp); else ++itp;
+              }
+              if (this->pending_requests_.empty()) this->polling_active_ = false;
+              close(this->clients_[victim].fd);
+              this->clients_[victim].fd = newfd;
+              this->clients_[victim].last_activity = millis();
+              INC(g_preempt_events);
+              // no per-event log
+              preempted = true;
+            }
+          }
+          if (!preempted) {
+            INC(g_noslot_events);
+            close(newfd);
+          }
+        }
       }
     }
   }
 
-  for (size_t i = 0; i < MAX_TCP_CLIENTS; ++i) {
+  for (size_t i = 0; i < allowed_clients; ++i) {
     auto &c = this->clients_[i];
     if (c.fd >= 0 && FD_ISSET(c.fd, &read_fds)) {
       int r = recv(c.fd, this->temp_buffer_.data(), this->temp_buffer_.size(), 0);
       if (r == 0) {
         ESP_LOGI(TAG, "TCP disconnect client_id=%zu", i);
         if (i < rx_accu.size()) rx_accu[i].clear();
+        for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
+          if (itp->client_fd == (int)i) itp = this->pending_requests_.erase(itp); else ++itp;
+        }
+        if (this->pending_requests_.empty()) this->polling_active_ = false;
         close(c.fd);
         c.fd = -1;
-        continue;
+        continue; 
       }
       if (r < 0) {
         if (errno != EWOULDBLOCK && errno != EAGAIN) {
           ESP_LOGW(TAG, "TCP error client_id=%zu err=%s", i, strerror(errno));
           if (i < rx_accu.size()) rx_accu[i].clear();
+          for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
+            if (itp->client_fd == (int)i) itp = this->pending_requests_.erase(itp); else ++itp;
+          }
+          if (this->pending_requests_.empty()) this->polling_active_ = false;
           close(c.fd);
           c.fd = -1;
         }
@@ -551,7 +683,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
         process_accu(rx_accu[idx], static_cast<int>(idx),
                      [&](const uint8_t *buf, size_t flen, int slot){ handle_tcp_payload(buf, flen, slot); });
         // Prevent unbounded growth in pathological cases (drop oldest data)
-        const size_t kMaxAccu = MODBUS_BRIDGE_TCP_ACCU_CAP;
+        const size_t kMaxAccu = kTcpAccuCap;
         if (rx_accu[idx].size() > kMaxAccu) {
           rx_accu[idx].clear();
         }
@@ -576,9 +708,17 @@ void ModbusBridgeComponent::poll_uart_response_() {
   PendingRequest &pending = this->pending_requests_.front();
 
   auto finish_request = [&]() {
-    this->pending_requests_.pop_front();
-    if (!this->pending_requests_.empty()) {
+    if (!this->pending_requests_.empty()) this->pending_requests_.pop_front();
+    // Find the next valid request whose client is still connected
+    while (!this->pending_requests_.empty()) {
       auto &next = this->pending_requests_.front();
+      bool client_ok = false;
+    #if defined(USE_ESP8266)
+      client_ok = next.client_fd >= 0 && next.client_fd < (int)this->clients_.size() && this->clients_[next.client_fd].socket.connected();
+    #elif defined(USE_ESP32)
+      client_ok = next.client_fd >= 0 && next.client_fd < (int)this->clients_.size() && this->clients_[next.client_fd].fd >= 0;
+    #endif
+      if (!client_ok) { this->pending_requests_.pop_front(); continue; }
       this->uart_->flush();
       // Drain any stale RX bytes before sending the next RTU request
       drain_uart_rx(this->uart_);
@@ -586,9 +726,10 @@ void ModbusBridgeComponent::poll_uart_response_() {
       if (this->debug_) {
         ESP_LOGD(TAG, "RTU send: %s client_id=%d", to_hex(next.rtu_data).c_str(), next.client_fd);
       }
-    } else {
-      this->polling_active_ = false;
+      return; // keep polling_active_ true
     }
+    // No valid requests remain
+    this->polling_active_ = false;
   };
 
   while (this->uart_->available()) {
