@@ -69,6 +69,7 @@ modbus_bridge:
   tcp_port: 502               #tcp port
   tcp_poll_interval: 50       #ms delay between catching new data from tcp
   tcp_client_timeout: 60000   #ms timeout tcp clients get disconnected if inactive
+  tcp_allowed_clients: 4      #set the number of allowed tcp clients
   rtu_response_timeout: 3000  #ms modbus rtu response timeout
 
 switch:
