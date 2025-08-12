@@ -37,6 +37,10 @@ static constexpr size_t kMaxFramesPerLoop     = 8;
 // Runtime toggle: preempt oldest same-IP connection when full
 static bool kPreemptSameIP = true;  // auf false setzen, um zu deaktivieren
 
+// Centralized caps
+static constexpr uint16_t MODBUS_TCP_LEN_CAP = 260;               // UID+PDU (LEN field)
+static constexpr size_t   MAX_TCP_READ       = 6 + MODBUS_TCP_LEN_CAP; // MBAP(6) + LEN
+
 // Lightweight runtime counters (file-scope, assume single instance)
 
 static uint32_t g_frames_in = 0;
@@ -72,6 +76,7 @@ using FrameHandler = std::function<void(const uint8_t*, size_t, int)>;
 static inline void build_tcp_from_rtu(const PendingRequest &pending,
                                       const std::vector<uint8_t> &rtu_resp,
                                       std::vector<uint8_t> &out) {
+  if (rtu_resp.size() < 3) return; // invalid RTU frame (uid + fc + crc)
   const size_t current_size = rtu_resp.size();
   const uint16_t pdu_length = static_cast<uint16_t>(current_size - 3); // FC + Data
   const uint16_t mbap_len   = static_cast<uint16_t>(pdu_length + 1);   // UID + PDU
@@ -107,33 +112,59 @@ void ModbusBridgeComponent::send_to_client_(int slot, const uint8_t *data, size_
 // Extract and process as many complete Modbus-TCP frames as possible from an accumulator
 static inline void process_accu(std::vector<uint8_t> &accu, int client_slot, const FrameHandler &on_frame) {
   int processed = 0;
+  // defensive cap for Modbus-TCP LEN (UID+PDU); typical max ~260
   while (accu.size() >= 7) {
     if (processed++ >= (int)kMaxFramesPerLoop) break;
     const uint8_t *buf = accu.data();
     uint16_t len_field = static_cast<uint16_t>((buf[4] << 8) | buf[5]);
+
+    // If LEN is clearly invalid, drop accumulator to recover from poison
+    if (len_field < 2 || len_field > MODBUS_TCP_LEN_CAP) {
+      accu.clear();
+      break;
+    }
+
     size_t frame_len = 6UL + static_cast<size_t>(len_field); // MBAP(6) + LEN (UID+PDU)
-    if (accu.size() < frame_len) break;                      // incomplete
+    if (frame_len > accu.size()) break; // incomplete; wait for more bytes
+
     on_frame(buf, frame_len, client_slot);
     accu.erase(accu.begin(), accu.begin() + frame_len);
   }
 }
 
+
 // Tiny counter helper
 #ifndef INC
 #define INC(x) do { ++(x); } while (0)
 #endif
+// Centralized purge for per-client state (accumulator + pending requests + polling flag)
+void ModbusBridgeComponent::purge_client_(size_t idx, std::vector<std::vector<uint8_t>> *accu_opt) {
+  if (accu_opt && idx < accu_opt->size()) (*accu_opt)[idx].clear();
+  for (auto it = this->pending_requests_.begin(); it != this->pending_requests_.end(); ) {
+    if (it->client_fd == (int)idx) it = this->pending_requests_.erase(it); else ++it;
+  }
+  if (this->pending_requests_.empty()) this->polling_active_ = false;
+}
 // -------------------------------------------------------------------------------------------
 
 
 ModbusBridgeComponent::ModbusBridgeComponent() {}
 
 
-void ModbusBridgeComponent::set_rtu_response_timeout(uint32_t timeout) {
-  this->rtu_response_timeout_ms_ = timeout;
-}
 
 void ModbusBridgeComponent::setup() {
   this->sock_ = -1;
+
+  // --- Safety guards: UART must be set and baud > 0 ---
+  if (this->uart_ == nullptr) {
+    ESP_LOGE(TAG, "UART not set – aborting setup");
+    return;
+  }
+  const uint32_t _br_setup_guard = this->uart_->get_baud_rate();
+  if (_br_setup_guard == 0) {
+    ESP_LOGE(TAG, "UART baud rate is 0 – aborting setup");
+    return;
+  }
 
   this->set_interval("tcp_server_and_network_check", 1000, [this]() {
     if (this->sock_ < 0 && network::is_connected()) {
@@ -167,16 +198,12 @@ void ModbusBridgeComponent::setup() {
   });
 
   // t3.5 ≈ 3.5 character times, conservatively 11 bits/char
-  this->rtu_inactivity_timeout_ms_ = static_cast<uint32_t>(std::ceil((3.5 * 11.0 * 1000.0) / this->uart_->get_baud_rate()) + 1);
+  this->rtu_inactivity_timeout_ms_ = static_cast<uint32_t>(std::ceil((3.5 * 11.0 * 1000.0) / _br_setup_guard) + 1);
   // Use a fixed-size scratch buffer for TCP reads (independent of UART RX size)
-  // 512 bytes comfortably covers typical Modbus-TCP frames (MBAP + PDU)
-  this->temp_buffer_.resize(512);
+  // One full Modbus-TCP frame (MBAP + LEN)
+  this->temp_buffer_.resize(MAX_TCP_READ);
   this->rtu_poll_interval_ms_ = this->rtu_inactivity_timeout_ms_ + 2;
   this->polling_active_ = false;
-  if (this->rtu_response_timeout_ms_ == 0) {
-    ESP_LOGW(TAG, "RTU response timeout set to 0 – falling back to 100 ms.");
-    this->rtu_response_timeout_ms_ = 100;
-  }
 
   // Periodic status log (debug only)
   this->set_interval("status_log", 10'000, [this]() {
@@ -264,10 +291,10 @@ void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, 
     g_drops_len++;
     return;
   }
-  // Hard cap to prevent abuse / oversized frames (typical max ~260 bytes)
-  const uint16_t MODBUS_LEN_CAP = 260;
-  if (modbus_len > MODBUS_LEN_CAP) {
-    ESP_LOGW(TAG, "Modbus length too large (%u > %u), dropping frame", (unsigned)modbus_len, (unsigned)MODBUS_LEN_CAP);
+  // Hard cap to prevent abuse / oversized frames
+  if (modbus_len > MODBUS_TCP_LEN_CAP) {
+    ESP_LOGW(TAG, "Modbus length too large (%u > %u), dropping frame",
+            (unsigned)modbus_len, (unsigned)MODBUS_TCP_LEN_CAP);
     g_drops_len++;
     return;
   }
@@ -278,7 +305,7 @@ void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, 
     return;
   }
   if (modbus_len > this->temp_buffer_.size() - 6) {
-    ESP_LOGW(TAG, "Invalid Modbus length field: %d", modbus_len);
+    ESP_LOGW(TAG, "Invalid Modbus length field: %d (exceeds MAX_TCP_READ)", modbus_len);
     g_drops_len++;
     return;
   }
@@ -293,8 +320,11 @@ void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, 
 
   if (this->debug_) {
     uint32_t now = millis();
-    uint32_t last = this->clients_[client_fd].last_activity;
-    float seconds_ago = (now - last) / 1000.0f;
+    float seconds_ago = -1.0f;
+    if (client_fd >= 0 && client_fd < (int)this->clients_.size()) {
+      uint32_t last = this->clients_[client_fd].last_activity;
+      seconds_ago = (now - last) / 1000.0f;
+    }
     ESP_LOGD(TAG, "TCP->RTU UID: %d, FC: 0x%02X, LEN: %d (client_id=%d, last activity %.3f s ago)",
          uid, rtu[1], modbus_len, client_fd, seconds_ago);
   }
@@ -303,9 +333,13 @@ void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, 
   req.client_fd = client_fd;
   req.rtu_data = rtu;
   memcpy(req.header, data, 7);
-  req.response.reserve(this->uart_->get_rx_buffer_size());
+  {
+    size_t rx_cap = this->uart_->get_rx_buffer_size();
+    req.response.reserve(std::max<size_t>(rx_cap, 256));
+  }
   req.start_time = millis();
-  req.last_change = millis();
+  req.last_change = req.start_time;
+  req.last_size = 0; // ensure deterministic timeout logic
   g_frames_in++;
   this->pending_requests_.push_back(std::move(req));
 
@@ -339,12 +373,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
         // Reuse the existing slot: drop old socket, keep the new one
         size_t slot_idx = idx;
         ex.socket.stop();
-        if (slot_idx < rx_accu8266.size()) rx_accu8266[slot_idx].clear();
-        // Purge any pending requests that target this slot
-        for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
-          if (itp->client_fd == (int)slot_idx) itp = this->pending_requests_.erase(itp); else ++itp;
-        }
-        if (this->pending_requests_.empty()) this->polling_active_ = false;
+        this->purge_client_(slot_idx, &rx_accu8266);
         ex.socket = new_client;
         ex.socket.setNoDelay(true);
         ex.socket.setTimeout(10);
@@ -357,8 +386,11 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
     if (duplicate) {
       // new_client now installed in the slot; skip further processing
     } else {
-      // Ensure accumulator size tracks clients_ size
-      if (rx_accu8266.size() < this->clients_.size()) rx_accu8266.resize(this->clients_.size());
+      // Ensure accumulator size tracks clients_ size and reserve capacity
+      if (rx_accu8266.size() < this->clients_.size()) {
+        rx_accu8266.resize(this->clients_.size());
+        for (auto &v : rx_accu8266) if (v.capacity() < kTcpAccuCap8266) v.reserve(kTcpAccuCap8266);
+      }
 
       // Try to reuse a free slot (disconnected client)
       bool placed = false;
@@ -387,6 +419,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
           client.last_activity = millis();
           this->clients_.push_back(client);
           rx_accu8266.emplace_back();
+          if (rx_accu8266.back().capacity() < kTcpAccuCap8266) rx_accu8266.back().reserve(kTcpAccuCap8266);
           this->clients_.back().disconnect_notified = false;
           ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d", new_client.remoteIP().toString().c_str(), (unsigned)new_client.remotePort(), (int)(this->clients_.size() - 1));
           g_clients_connected++;
@@ -408,17 +441,14 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
             if (victim != SIZE_MAX) {
               // close victim and install new client; purge its pending requests
               this->clients_[victim].socket.stop();
-              if (victim < rx_accu8266.size()) rx_accu8266[victim].clear();
-              for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
-                if (itp->client_fd == (int)victim) itp = this->pending_requests_.erase(itp); else ++itp;
-              }
-              if (this->pending_requests_.empty()) this->polling_active_ = false;
+              this->purge_client_(victim, &rx_accu8266);
               this->clients_[victim].socket = new_client;
               this->clients_[victim].socket.setNoDelay(true);
               this->clients_[victim].socket.setTimeout(10);
               this->clients_[victim].last_activity = millis();
               this->clients_[victim].disconnect_notified = false;
               INC(g_preempt_events);
+              INC(g_clients_connected);
               //ESP_LOGI(TAG, "TCP preempt same-ip client_id=%u", (unsigned)victim);
               preempted = true;
             }
@@ -441,12 +471,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
         it->disconnect_notified = true;
       }
       it->socket.stop();
-      if (idx < rx_accu8266.size()) rx_accu8266[idx].clear();
-      // Drop any pending requests for this slot
-      for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
-        if (itp->client_fd == (int)idx) itp = this->pending_requests_.erase(itp); else ++itp;
-      }
-      if (this->pending_requests_.empty()) this->polling_active_ = false;
+      this->purge_client_(idx, &rx_accu8266);
       ++it;
       continue;
     }
@@ -456,29 +481,29 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       ESP_LOGW(TAG, "TCP timeout client_id=%u", (unsigned)idx);
       it->socket.stop();
       it->disconnect_notified = true;
-      if (idx < rx_accu8266.size()) rx_accu8266[idx].clear();
-      // Drop any pending requests for this slot
-      for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
-        if (itp->client_fd == (int)idx) itp = this->pending_requests_.erase(itp); else ++itp;
-      }
-      if (this->pending_requests_.empty()) this->polling_active_ = false;
+      this->purge_client_(idx, &rx_accu8266);
       ++it;
       continue;
     }
 
     if (it->socket.available() >= 1) {
-      int r = it->socket.readBytes(this->temp_buffer_.data(), this->temp_buffer_.size());
-      int client_fd = static_cast<int>(std::distance(this->clients_.begin(), it));
-      if (rx_accu8266.size() < this->clients_.size()) rx_accu8266.resize(this->clients_.size());
-      // Append incoming data
-      rx_accu8266[client_fd].insert(rx_accu8266[client_fd].end(), this->temp_buffer_.begin(), this->temp_buffer_.begin() + r);
-      process_accu(rx_accu8266[client_fd], client_fd,
-                   [&](const uint8_t *buf, size_t flen, int slot){ handle_tcp_payload(buf, flen, slot); });
-      // Cap accumulator size to avoid growth on garbage
-      const size_t kMaxAccu8266 = kTcpAccuCap8266;
-      if (rx_accu8266[client_fd].size() > kMaxAccu8266) rx_accu8266[client_fd].clear();
-      this->clients_[client_fd].disconnect_notified = false; // receiving traffic confirms connection
-      it->last_activity = millis();
+      int avail = it->socket.available();
+      int to_read = std::min(avail, (int)this->temp_buffer_.size());
+      int r = it->socket.read(this->temp_buffer_.data(), to_read);
+      if (r > 0) {
+        int client_fd = static_cast<int>(std::distance(this->clients_.begin(), it));
+        if (rx_accu8266.size() < this->clients_.size()) rx_accu8266.resize(this->clients_.size());
+        if (rx_accu8266[client_fd].capacity() < kTcpAccuCap8266) rx_accu8266[client_fd].reserve(kTcpAccuCap8266);
+        // Append incoming data
+        rx_accu8266[client_fd].insert(rx_accu8266[client_fd].end(), this->temp_buffer_.begin(), this->temp_buffer_.begin() + r);
+        process_accu(rx_accu8266[client_fd], client_fd,
+                     [&](const uint8_t *buf, size_t flen, int slot){ handle_tcp_payload(buf, flen, slot); });
+        // Cap accumulator size to avoid growth on garbage
+        const size_t kMaxAccu8266 = kTcpAccuCap8266;
+        if (rx_accu8266[client_fd].size() > kMaxAccu8266) rx_accu8266[client_fd].clear();
+        this->clients_[client_fd].disconnect_notified = false; // receiving traffic confirms connection
+        it->last_activity = millis();
+      }
     }
 
     ++it;
@@ -492,6 +517,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
 
   // Ensure accumulator vector matches clients_ size
   if (rx_accu.size() != this->clients_.size()) rx_accu.assign(this->clients_.size(), {});
+  for (auto &v : rx_accu) if (v.capacity() < kTcpAccuCap) v.reserve(kTcpAccuCap);
 
   const size_t allowed_clients = this->tcp_allowed_clients_;
 
@@ -515,11 +541,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
     if (c.fd >= 0) {
       if (now - c.last_activity > this->tcp_client_timeout_ms_) {
         ESP_LOGW(TAG, "TCP timeout client_id=%zu", idx);
-        if (idx < rx_accu.size()) rx_accu[idx].clear();
-        for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
-          if (itp->client_fd == (int)idx) itp = this->pending_requests_.erase(itp); else ++itp;
-        }
-        if (this->pending_requests_.empty()) this->polling_active_ = false;
+        this->purge_client_(idx, &rx_accu);
         close(c.fd);
         c.fd = -1;
         continue;
@@ -554,12 +576,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
               existing_addr.sin_port == client_addr.sin_port) {
             // Reuse the existing slot: replace old fd with new one
             size_t idx = static_cast<size_t>(&c - &this->clients_[0]);
-            if (idx < rx_accu.size()) rx_accu[idx].clear();
-            // Purge pending requests for this slot to avoid delivering to a new owner
-            for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
-              if (itp->client_fd == (int)idx) itp = this->pending_requests_.erase(itp); else ++itp;
-            }
-            if (this->pending_requests_.empty()) this->polling_active_ = false;
+            this->purge_client_(idx, &rx_accu);
             close(c.fd);
             c.fd = newfd;
             c.last_activity = millis();
@@ -626,15 +643,12 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
               }
             }
             if (victim != SIZE_MAX) {
-              if (victim < rx_accu.size()) rx_accu[victim].clear();
-              for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
-                if (itp->client_fd == (int)victim) itp = this->pending_requests_.erase(itp); else ++itp;
-              }
-              if (this->pending_requests_.empty()) this->polling_active_ = false;
+              this->purge_client_(victim, &rx_accu);
               close(this->clients_[victim].fd);
               this->clients_[victim].fd = newfd;
               this->clients_[victim].last_activity = millis();
               INC(g_preempt_events);
+              INC(g_clients_connected);
               // no per-event log
               preempted = true;
             }
@@ -654,11 +668,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       int r = recv(c.fd, this->temp_buffer_.data(), this->temp_buffer_.size(), 0);
       if (r == 0) {
         ESP_LOGI(TAG, "TCP disconnect client_id=%zu", i);
-        if (i < rx_accu.size()) rx_accu[i].clear();
-        for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
-          if (itp->client_fd == (int)i) itp = this->pending_requests_.erase(itp); else ++itp;
-        }
-        if (this->pending_requests_.empty()) this->polling_active_ = false;
+        this->purge_client_(i, &rx_accu);
         close(c.fd);
         c.fd = -1;
         continue; 
@@ -666,11 +676,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       if (r < 0) {
         if (errno != EWOULDBLOCK && errno != EAGAIN) {
           ESP_LOGW(TAG, "TCP error client_id=%zu err=%s", i, strerror(errno));
-          if (i < rx_accu.size()) rx_accu[i].clear();
-          for (auto itp = this->pending_requests_.begin(); itp != this->pending_requests_.end(); ) {
-            if (itp->client_fd == (int)i) itp = this->pending_requests_.erase(itp); else ++itp;
-          }
-          if (this->pending_requests_.empty()) this->polling_active_ = false;
+          this->purge_client_(i, &rx_accu);
           close(c.fd);
           c.fd = -1;
         }
@@ -732,10 +738,11 @@ void ModbusBridgeComponent::poll_uart_response_() {
     this->polling_active_ = false;
   };
 
-  while (this->uart_->available()) {
-    uint8_t byte;
-    if (this->uart_->read_byte(&byte)) {
-      pending.response.push_back(byte);
+  size_t avail = this->uart_->available();
+  if (avail) {
+    pending.response.reserve(pending.response.size() + avail);
+    for (size_t i = 0; i < avail; ++i) {
+      uint8_t b; if (this->uart_->read_byte(&b)) pending.response.push_back(b); else break;
     }
   }
 
@@ -764,13 +771,19 @@ void ModbusBridgeComponent::poll_uart_response_() {
   }
 
   if (millis() - pending.last_change > this->rtu_inactivity_timeout_ms_) {
-    if (this->debug_) {
-      std::string debug_output = to_hex(pending.response);
-      ESP_LOGD(TAG, "RTU recv (%d bytes): %s", (int)current_size, debug_output.c_str());
-    }
+  if (this->debug_) {
+    std::string debug_output = to_hex(pending.response);
+    ESP_LOGD(TAG, "RTU recv (%d bytes): %s", (int)current_size, debug_output.c_str());
+  }
 
-    std::vector<uint8_t> tcp_response;
-    build_tcp_from_rtu(pending, pending.response, tcp_response);
+  if (current_size < 3) {
+    ESP_LOGW(TAG, "Invalid RTU response (<3 bytes) – dropping");
+    finish_request();
+    return;
+  }
+
+  std::vector<uint8_t> tcp_response;
+  build_tcp_from_rtu(pending, pending.response, tcp_response);
 
     if (this->debug_) {
       std::string tcp_debug = to_hex(tcp_response);
@@ -793,8 +806,6 @@ void ModbusBridgeComponent::poll_uart_response_() {
 
   return;
 }
-
-// end_pending_request_ is now obsolete
 
 void ModbusBridgeComponent::append_crc(std::vector<uint8_t> &data) {
   uint16_t crc = 0xFFFF;
