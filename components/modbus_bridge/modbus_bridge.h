@@ -58,9 +58,15 @@ class ModbusBridgeComponent : public Component {
   void set_tcp_port(uint16_t port) { tcp_port_ = port; }
   void set_tcp_poll_interval(uint32_t interval_ms) { tcp_poll_interval_ms_ = interval_ms; }
   void set_tcp_client_timeout(uint32_t timeout_ms) { tcp_client_timeout_ms_ = timeout_ms; }
-  void set_rtu_response_timeout(uint32_t timeout);
+  void set_rtu_response_timeout(uint32_t timeout) {
+    if (timeout < 10) timeout = 10;
+    rtu_response_timeout_ms_ = timeout;
+  }
   void set_debug(bool debug);
-  void set_tcp_allowed_clients(uint8_t allowed) { tcp_allowed_clients_ = allowed; }
+  void set_tcp_allowed_clients(uint8_t allowed) {
+    if (allowed < 1) allowed = 1;
+    tcp_allowed_clients_ = allowed;
+  }
 
   void setup() override;
 
@@ -92,6 +98,7 @@ protected:
   void check_tcp_sockets_();
   void handle_tcp_payload(const uint8_t *data, size_t len, int client_fd);
   void send_to_client_(int slot, const uint8_t *data, size_t len);
+  void purge_client_(size_t idx, std::vector<std::vector<uint8_t>> *accu_opt);
 };
 
 }  // namespace modbus_bridge
