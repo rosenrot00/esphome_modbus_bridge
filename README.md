@@ -30,12 +30,13 @@ The response will match the Modbus TCP format and contain the same transaction I
 
 #### Features
 
-- Acts as a Modbus RTU master on the UART interface
-- Accepts Modbus TCP connections from multiple clients
-- Translates TCP frames to RTU and vice versa
-- Automatically detects end of RTU frames using UART silence (no byte count parsing required)
-- Works with any Modbus function code
-- Compatible with Home Assistant and third-party Modbus TCP tools
+- Acts as a Modbus RTU master on UART
+- Multiple concurrent Modbus TCP clients (slot‑limited)
+- TCP↔RTU translation both ways
+- RTU end‑of‑frame via UART silence (no byte count needed)
+- Works with all Modbus function codes
+- Optional same‑IP preemption when slots are full
+- Compatible with Home Assistant and third‑party Modbus TCP tools
 
 #### ESPHome Configuration Example
 
@@ -61,22 +62,22 @@ uart:
   rx_pin: GPIO16
   baud_rate: 9600
   stop_bits: 1
-  rx_buffer_size: 256         #increase in case more than 256 bytes long modbus messages are expected
+  rx_buffer_size: 256         # min. 256 recommended; increase for very long RTU responses
 
 modbus_bridge:
   id: mb_bridge
   uart_id: uart_bus
-  tcp_port: 502               #tcp port
-  tcp_poll_interval: 50       #ms delay between catching new data from tcp
-  tcp_client_timeout: 60000   #ms timeout tcp clients get disconnected if inactive
-  tcp_allowed_clients: 4      #set the number of allowed tcp clients
-  rtu_response_timeout: 3000  #ms modbus rtu response timeout
+  tcp_port: 502               # TCP port
+  tcp_poll_interval: 50       # ms between TCP polls
+  tcp_client_timeout: 60000   # ms inactivity until TCP client is disconnected
+  tcp_allowed_clients: 4      # clamped to minimum 1, use with care as it increases memory usage
+  rtu_response_timeout: 3000  # ms, clamped internally to minimum of 10 ms)
 
 switch:
   - platform: template
     name: "Modbus Bridge Debug"
     id: modbus_debug_switch
-    restore_mode: RESTORE_DEFAULT_OFF  ##debug is disabled by default on first boot, consequently preserved across reboots.
+    restore_mode: RESTORE_DEFAULT_OFF  # debug disabled by default; persists across reboots
     turn_on_action:
       - lambda: |-
           id(mb_bridge).set_debug(true);
