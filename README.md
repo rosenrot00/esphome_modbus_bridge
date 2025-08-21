@@ -134,5 +134,5 @@ python modbus_rw.py --host 192.168.0.10 --register 0x0010 --value 0x1234
 ```
 #### Requirements
 - Python 3.x  
-- `pymodbus` library  
+- `pymodbus ≤3.9.x` library (let me know if you need it compatible with >3.10)
   Install via: pip install pymodbus
