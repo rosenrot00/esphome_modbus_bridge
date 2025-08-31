@@ -13,8 +13,13 @@
 
 
 #ifdef USE_ESP32
-#include <lwip/sockets.h>
-#include <fcntl.h>
++#include <lwip/sockets.h>
++#include <lwip/netdb.h>
++#include <lwip/inet.h>
++#include <lwip/tcp.h>
++#include <fcntl.h>
++#include <sys/time.h>
++#include <errno.h>
 #endif
 
 #include "modbus_bridge.h"
@@ -552,7 +557,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
   }
 
   struct timeval timeout = {0, 0};
-  int sel = select(maxfd + 1, &read_fds, NULL, NULL, &timeout);
+  int sel = lwip_select(maxfd + 1, &read_fds, NULL, NULL, &timeout);
   if (sel < 0) return;
 
   if (FD_ISSET(this->sock_, &read_fds)) {
