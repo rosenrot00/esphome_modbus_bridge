@@ -15,11 +15,7 @@
 #ifdef USE_ESP32
 +#include <lwip/sockets.h>
 +#include <lwip/netdb.h>
-+#include <lwip/inet.h>
-+#include <lwip/tcp.h>
-+#include <fcntl.h>
-+#include <sys/time.h>
-+#include <errno.h>
+#include <fcntl.h>
 #endif
 
 #include "modbus_bridge.h"
