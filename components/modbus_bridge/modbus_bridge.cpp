@@ -19,7 +19,7 @@
 
 #if defined(USE_ESP32) && !defined(USE_ARDUINO)
 extern "C" void ets_delay_us(uint32_t);
-#define delayMicroseconds(x) ets_delay_us(x)
+#define delayMicroseconds(x) ::ets_delay_us((uint32_t)(x))
 #endif
 
 #include "modbus_bridge.h"
