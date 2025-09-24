@@ -17,11 +17,6 @@
 #include <fcntl.h>
 #endif
 
-#if defined(USE_ESP32) && !defined(USE_ARDUINO)
-extern "C" void ets_delay_us(uint32_t);
-#define delayMicroseconds(x) ::ets_delay_us((uint32_t)(x))
-#endif
-
 #include "modbus_bridge.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
@@ -168,16 +163,28 @@ inline void ModbusBridgeComponent::rs485_begin_tx_() {
   this->rs485_set_tx_(true);
   if (this->char_time_us_ > 0) {
     // small pre-delay ~½ char to let the transceiver enable cleanly
-    delayMicroseconds(this->char_time_us_ / 2);
+    MB_DELAY_US(this->char_time_us_ / 2);
   }
 }
 
 inline void ModbusBridgeComponent::rs485_end_tx_() {
   if (!this->flow_control_pin_) return;
   // ensure last stop bit left the wire
-  if (this->char_time_us_ > 0) delayMicroseconds(this->char_time_us_);
+  if (this->char_time_us_ > 0) MB_DELAY_US(this->char_time_us_);
   this->rs485_set_tx_(false);
 }
+
+// Portable µs delay wrapper: uses Arduino's delayMicroseconds if available,
+// otherwise calls the ROM ETS delay on non-Arduino ESP32 builds.
+static inline void MB_DELAY_US(uint32_t us) {
+#if defined(USE_ESP32) && !defined(USE_ARDUINO)
+  extern "C" void ets_delay_us(uint32_t);
+  ::ets_delay_us(us);
+#else
+  delayMicroseconds(us);
+#endif
+}
+
 // -------------------------------------------------------------------------------------------
 
 
