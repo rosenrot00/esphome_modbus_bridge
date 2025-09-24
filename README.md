@@ -67,12 +67,16 @@ uart:
 modbus_bridge:
   id: mb_bridge
   uart_id: uart_bus
-  #flow_control_pin: GPIO18    # (optional) toggles RS485 DE/RE if defined
   tcp_port: 502               # TCP port
   tcp_poll_interval: 50       # ms between TCP polls
   tcp_client_timeout: 60000   # ms inactivity until TCP client is disconnected
   tcp_allowed_clients: 4      # clamped to minimum 1, use with care as it increases memory usage
   rtu_response_timeout: 3000  # ms, clamped internally to minimum of 10 ms)
+  # --- optional: toggles RS485 DE/RE if defined ---
+  #flow_control_pin: GPIO18    # (simple)
+  #flow_control_pin:           # (detailed, mode/output/open_drain also possible)
+    #number: GPIO18
+    #inverted: false
 
 switch:
   - platform: template
