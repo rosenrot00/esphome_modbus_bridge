@@ -2,6 +2,7 @@ import esphome.config_validation as cv
 import esphome.codegen as cg
 from esphome.components import uart
 from esphome.const import CONF_ID
+from esphome import pins
 
 CONF_TCP_PORT = "tcp_port"
 CONF_TCP_POLL_INTERVAL = "tcp_poll_interval"
