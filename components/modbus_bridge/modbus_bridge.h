@@ -2,6 +2,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/uart/uart.h"
+#include "esphome/core/hal.h"  // GPIOPin
 #include <vector>
 #include <memory>
 #include <functional>
@@ -12,7 +13,6 @@
 #ifdef USE_ESP8266
 #include <ESP8266WiFi.h>
 #endif
-
 
 namespace esphome {
 namespace modbus_bridge {
@@ -48,8 +48,6 @@ struct PendingRequest {
   size_t last_size = 0;  // tracks last observed response size to reset inactivity timer
 };
 
-class ModbusBridgeComponent;  // Forward declaration
-
 class ModbusBridgeComponent : public Component {
  public:
   ModbusBridgeComponent();
@@ -68,9 +66,12 @@ class ModbusBridgeComponent : public Component {
     tcp_allowed_clients_ = allowed;
   }
 
+  // NEW – optional RS-485 DE/RE control pin (only used if set)
+  void set_flow_control_pin(GPIOPin *pin) { flow_control_pin_ = pin; }
+
   void setup() override;
 
-protected:
+ protected:
   uart::UARTComponent *uart_{nullptr};
   int sock_{-1};
 #ifdef USE_ESP32
@@ -91,6 +92,14 @@ protected:
   uint8_t tcp_allowed_clients_{4};
 
   bool polling_active_{false};
+
+  // NEW – cached timing for RS-485 toggling
+  uint32_t baud_cache_{0};
+  uint32_t char_time_us_{0};
+
+  // NEW – optional RS-485 DE/RE pin
+  GPIOPin *flow_control_pin_{nullptr};
+
   void start_uart_polling_();
   void append_crc(std::vector<uint8_t> &data);
   void initialize_tcp_server_();
@@ -99,6 +108,11 @@ protected:
   void handle_tcp_payload(const uint8_t *data, size_t len, int client_fd);
   void send_to_client_(int slot, const uint8_t *data, size_t len);
   void purge_client_(size_t idx, std::vector<std::vector<uint8_t>> *accu_opt);
+
+  // RS-485 helpers (no-ops when flow_control_pin_ is null)
+  void rs485_begin_tx_();
+  void rs485_end_tx_();
+  void rs485_set_tx_(bool en);
 };
 
 }  // namespace modbus_bridge
