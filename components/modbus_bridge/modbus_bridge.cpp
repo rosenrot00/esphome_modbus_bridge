@@ -148,17 +148,6 @@ void ModbusBridgeComponent::purge_client_(size_t idx, std::vector<std::vector<ui
 
 // --- Optional RS-485 DE/RE support ------------------------------------------
 
-// Portable µs delay wrapper: uses Arduino's delayMicroseconds if available,
-// otherwise calls the ROM ETS delay on non-Arduino ESP32 builds.
-static inline void MB_DELAY_US(uint32_t us) {
-#if defined(USE_ESP32) && !defined(USE_ARDUINO)
-  extern "C" void ets_delay_us(uint32_t);
-  ::ets_delay_us(us);
-#else
-  delayMicroseconds(us);
-#endif
-}
-
 static inline uint32_t calc_char_time_us_(uint32_t baud) {
   // ~11 bits/char (start + 8 data + parity/stop)
   if (baud == 0) return 0;
@@ -175,14 +164,14 @@ inline void ModbusBridgeComponent::rs485_begin_tx_() {
   this->rs485_set_tx_(true);
   if (this->char_time_us_ > 0) {
     // small pre-delay ~½ char to let the transceiver enable cleanly
-    MB_DELAY_US(this->char_time_us_ / 2);
+    delayMicroseconds(this->char_time_us_ / 2);
   }
 }
 
 inline void ModbusBridgeComponent::rs485_end_tx_() {
   if (!this->flow_control_pin_) return;
   // ensure last stop bit left the wire
-  if (this->char_time_us_ > 0) MB_DELAY_US(this->char_time_us_);
+  if (this->char_time_us_ > 0) delayMicroseconds(this->char_time_us_);
   this->rs485_set_tx_(false);
 }
 
@@ -190,8 +179,6 @@ inline void ModbusBridgeComponent::rs485_end_tx_() {
 
 
 ModbusBridgeComponent::ModbusBridgeComponent() {}
-
-
 
 void ModbusBridgeComponent::setup() {
   this->sock_ = -1;
