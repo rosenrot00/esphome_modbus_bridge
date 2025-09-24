@@ -2,6 +2,13 @@
 
 This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting as a Modbus RTU master over UART on both ESP8266 and ESP32 platforms. It allows multiple Modbus TCP clients to communicate with Modbus RTU slaves via RS485 or other UART-compatible hardware.
 
+| Version   | Changes                                                                           |
+|-----------|-----------------------------------------------------------------------------------|
+| 2025-09.1 | Added configurable `flow_control_pin` with inverted option                        |
+| 2025-08.2 | Improved RTU response handling (silence-based end detection)                      |
+| 2025-08.1 | Added support for multiple concurrent TCP clients with preemption logic           |
+| 2025-07.1 | Initial public README and Python `modbus_rw.py` tool                              |
+
 #### Protocol Overview
 
 The bridge listens on a configurable TCP port (default: 502) and expects standard Modbus TCP frames from clients. Each request is translated into a Modbus RTU frame, transmitted over UART, and the response is converted back into Modbus TCP and returned to the client.
