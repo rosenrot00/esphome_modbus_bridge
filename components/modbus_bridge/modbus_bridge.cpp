@@ -158,10 +158,6 @@ static inline uint32_t calc_char_time_us_(uint32_t baud) {
   return static_cast<uint32_t>((11ULL * 1000000ULL) / baud);
 }
 
-void ModbusBridgeComponent::set_flow_control_pin(GPIOPin *pin) {
-  this->flow_control_pin_ = pin; // may be nullptr if not configured
-}
-
 inline void ModbusBridgeComponent::rs485_set_tx_(bool en) {
   if (!this->flow_control_pin_) return;
   this->flow_control_pin_->digital_write(en);
