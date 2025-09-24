@@ -11,19 +11,23 @@
 #include "IPAddress.h"
 #endif
 
-
 #ifdef USE_ESP32
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
 #include <fcntl.h>
 #endif
 
+#if defined(USE_ESP32) && !defined(USE_ARDUINO)
+extern "C" void ets_delay_us(uint32_t);
+#define delayMicroseconds(x) ets_delay_us(x)
+#endif
+
 #include "modbus_bridge.h"
 #include "esphome/core/log.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/application.h"
+#include "esphome/core/hal.h"
 #include "esphome/components/network/util.h"
-
 
 namespace esphome {
 namespace modbus_bridge {
@@ -146,6 +150,38 @@ void ModbusBridgeComponent::purge_client_(size_t idx, std::vector<std::vector<ui
   }
   if (this->pending_requests_.empty()) this->polling_active_ = false;
 }
+
+// --- Optional RS-485 DE/RE support ------------------------------------------
+static inline uint32_t calc_char_time_us_(uint32_t baud) {
+  // ~11 bits/char (start + 8 data + parity/stop)
+  if (baud == 0) return 0;
+  return static_cast<uint32_t>((11ULL * 1000000ULL) / baud);
+}
+
+void ModbusBridgeComponent::set_flow_control_pin(GPIOPin *pin) {
+  this->flow_control_pin_ = pin; // may be nullptr if not configured
+}
+
+inline void ModbusBridgeComponent::rs485_set_tx_(bool en) {
+  if (!this->flow_control_pin_) return;
+  this->flow_control_pin_->digital_write(en);
+}
+
+inline void ModbusBridgeComponent::rs485_begin_tx_() {
+  if (!this->flow_control_pin_) return;
+  this->rs485_set_tx_(true);
+  if (this->char_time_us_ > 0) {
+    // small pre-delay ~½ char to let the transceiver enable cleanly
+    delayMicroseconds(this->char_time_us_ / 2);
+  }
+}
+
+inline void ModbusBridgeComponent::rs485_end_tx_() {
+  if (!this->flow_control_pin_) return;
+  // ensure last stop bit left the wire
+  if (this->char_time_us_ > 0) delayMicroseconds(this->char_time_us_);
+  this->rs485_set_tx_(false);
+}
 // -------------------------------------------------------------------------------------------
 
 
@@ -165,6 +201,15 @@ void ModbusBridgeComponent::setup() {
   if (_br_setup_guard == 0) {
     ESP_LOGE(TAG, "UART baud rate is 0 – aborting setup");
     return;
+  }
+
+  // cache baud + char time; setup optional RS-485 pin
+  this->baud_cache_   = _br_setup_guard;
+  this->char_time_us_ = calc_char_time_us_(this->baud_cache_);
+
+  if (this->flow_control_pin_) {
+    this->flow_control_pin_->setup();          // output
+    this->flow_control_pin_->digital_write(false); // RX mode (DE/RE low)
   }
 
   this->set_interval("tcp_server_and_network_check", 1000, [this]() {
@@ -349,9 +394,11 @@ void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, 
       ESP_LOGD(TAG, "RTU send: %s client_id=%d", to_hex(rtu).c_str(), client_fd);
     }
     this->uart_->flush();
-    // Drain any stale RX bytes before sending a new RTU request
     drain_uart_rx(this->uart_);
+    this->rs485_begin_tx_();
     this->uart_->write_array(rtu);
+    this->uart_->flush();         
+    this->rs485_end_tx_();         
     this->start_uart_polling_();
   }
 }
@@ -727,9 +774,11 @@ void ModbusBridgeComponent::poll_uart_response_() {
     #endif
       if (!client_ok) { this->pending_requests_.pop_front(); continue; }
       this->uart_->flush();
-      // Drain any stale RX bytes before sending the next RTU request
       drain_uart_rx(this->uart_);
+      this->rs485_begin_tx_();
       this->uart_->write_array(next.rtu_data);
+      this->uart_->flush();
+      this->rs485_end_tx_();
       if (this->debug_) {
         ESP_LOGD(TAG, "RTU send: %s client_id=%d", to_hex(next.rtu_data).c_str(), next.client_fd);
       }
