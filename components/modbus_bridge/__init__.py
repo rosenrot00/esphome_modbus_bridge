@@ -8,6 +8,7 @@ CONF_TCP_POLL_INTERVAL = "tcp_poll_interval"
 CONF_TCP_CLIENT_TIMEOUT = "tcp_client_timeout"
 CONF_RTU_RESPONSE_TIMEOUT = "rtu_response_timeout"
 CONF_TCP_ALLOWED_CLIENTS = "tcp_allowed_clients"
+CONF_FLOW_CONTROL_PIN = "flow_control_pin"
 
 modbus_bridge_ns = cg.esphome_ns.namespace('modbus_bridge')
 ModbusBridgeComponent = modbus_bridge_ns.class_('ModbusBridgeComponent', cg.Component)
@@ -15,6 +16,7 @@ ModbusBridgeComponent = modbus_bridge_ns.class_('ModbusBridgeComponent', cg.Comp
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(ModbusBridgeComponent),
     cv.Required("uart_id"): cv.use_id(uart.UARTComponent),
+    cv.Optional(CONF_FLOW_CONTROL_PIN): pins.gpio_output_pin_schema,
     cv.Optional(CONF_TCP_PORT, default=502): cv.port,
     cv.Optional(CONF_TCP_POLL_INTERVAL, default=50): cv.positive_int,
     cv.Optional(CONF_TCP_CLIENT_TIMEOUT, default=60000): cv.positive_int,
@@ -33,3 +35,8 @@ async def to_code(config):
     cg.add(var.set_tcp_client_timeout(config[CONF_TCP_CLIENT_TIMEOUT]))
     cg.add(var.set_rtu_response_timeout(config[CONF_RTU_RESPONSE_TIMEOUT]))
     cg.add(var.set_tcp_allowed_clients(config[CONF_TCP_ALLOWED_CLIENTS]))
+    
+    # NEW – optional RS-485 DE/RE (flow control) pin
+    if CONF_FLOW_CONTROL_PIN in config:
+        pin = await cg.gpio_pin_expression(config[CONF_FLOW_CONTROL_PIN])
+        cg.add(var.set_flow_control_pin(pin))
