@@ -36,7 +36,7 @@ async def to_code(config):
     cg.add(var.set_rtu_response_timeout(config[CONF_RTU_RESPONSE_TIMEOUT]))
     cg.add(var.set_tcp_allowed_clients(config[CONF_TCP_ALLOWED_CLIENTS]))
     
-    # NEW – optional RS-485 DE/RE (flow control) pin
+    # optional RS-485 DE/RE (flow control) pin
     if CONF_FLOW_CONTROL_PIN in config:
         pin = await cg.gpio_pin_expression(config[CONF_FLOW_CONTROL_PIN])
         cg.add(var.set_flow_control_pin(pin))
