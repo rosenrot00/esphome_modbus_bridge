@@ -4,6 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting a
 
 | Version   | Changes                                                                           |
 |-----------|-----------------------------------------------------------------------------------|
+| 2025.10.1 | Implemented support for multiple bridges to be used with multiple UART interfaces |
 | 2025.09.1 | Added configurable `flow_control_pin` with inverted option                        |
 | 2025.08.2 | Improved RTU response handling (silence-based end detection)                      |
 | 2025.08.1 | Added support for multiple concurrent TCP clients with preemption logic           |
