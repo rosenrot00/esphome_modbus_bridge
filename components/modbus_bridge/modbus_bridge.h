@@ -31,6 +31,9 @@ struct TCPClient {
   int fd = -1;
   uint32_t last_activity = 0;
 };
+std::vector<std::vector<uint8_t>> rx_accu_;
+#elif defined(USE_ESP8266)
+std::vector<std::vector<uint8_t>> rx_accu8266_;
 #endif
 
 struct PendingRequest {
