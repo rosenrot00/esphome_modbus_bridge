@@ -395,10 +395,12 @@ void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, 
 }
 
 void ModbusBridgeComponent::check_tcp_sockets_() {
- #if defined(USE_ESP8266)
-  static std::vector<std::vector<uint8_t>> rx_accu8266; // per-slot accumulator
+#if defined(USE_ESP8266)
+  // Per-instance RX accumulator
+  if (this->rx_accu8266_.size() < this->clients_.size())
+    this->rx_accu8266_.resize(this->clients_.size());
   if (this->sock_ < 0) {
-    for (auto &v : rx_accu8266) v.clear();
+    for (auto &v : this->rx_accu8266_) v.clear();
   }
   WiFiClient new_client = this->server_.accept();
   const size_t allowed_clients = this->tcp_allowed_clients_;
@@ -412,7 +414,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
         // Reuse the existing slot: drop old socket, keep the new one
         size_t slot_idx = idx;
         ex.socket.stop();
-        this->purge_client_(slot_idx, &rx_accu8266);
+        this->purge_client_(slot_idx, &this->rx_accu8266_);
         ex.socket = new_client;
         ex.socket.setNoDelay(true);
         ex.socket.setTimeout(10);
@@ -426,9 +428,9 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       // new_client now installed in the slot; skip further processing
     } else {
       // Ensure accumulator size tracks clients_ size and reserve capacity
-      if (rx_accu8266.size() < this->clients_.size()) {
-        rx_accu8266.resize(this->clients_.size());
-        for (auto &v : rx_accu8266) if (v.capacity() < kTcpAccuCap8266) v.reserve(kTcpAccuCap8266);
+      if (this->rx_accu8266_.size() < this->clients_.size()) {
+        this->rx_accu8266_.resize(this->clients_.size());
+        for (auto &v : this->rx_accu8266_) if (v.capacity() < kTcpAccuCap8266) v.reserve(kTcpAccuCap8266);
       }
 
       // Try to reuse a free slot (disconnected client)
@@ -440,7 +442,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
           this->clients_[idx].socket.setNoDelay(true);
           this->clients_[idx].socket.setTimeout(10);
           this->clients_[idx].last_activity = millis();
-          rx_accu8266[idx].clear();
+          this->rx_accu8266_[idx].clear();
           this->clients_[idx].disconnect_notified = false;
           ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d", new_client.remoteIP().toString().c_str(), (unsigned)new_client.remotePort(), (int)idx);
           g_clients_connected++;
@@ -457,8 +459,8 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
           client.socket.setTimeout(10);
           client.last_activity = millis();
           this->clients_.push_back(client);
-          rx_accu8266.emplace_back();
-          if (rx_accu8266.back().capacity() < kTcpAccuCap8266) rx_accu8266.back().reserve(kTcpAccuCap8266);
+          this->rx_accu8266_.emplace_back();
+          if (this->rx_accu8266_.back().capacity() < kTcpAccuCap8266) this->rx_accu8266_.back().reserve(kTcpAccuCap8266);
           this->clients_.back().disconnect_notified = false;
           ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d", new_client.remoteIP().toString().c_str(), (unsigned)new_client.remotePort(), (int)(this->clients_.size() - 1));
           g_clients_connected++;
@@ -480,7 +482,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
             if (victim != SIZE_MAX) {
               // close victim and install new client; purge its pending requests
               this->clients_[victim].socket.stop();
-              this->purge_client_(victim, &rx_accu8266);
+              this->purge_client_(victim, &this->rx_accu8266_);
               this->clients_[victim].socket = new_client;
               this->clients_[victim].socket.setNoDelay(true);
               this->clients_[victim].socket.setTimeout(10);
@@ -510,7 +512,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
         it->disconnect_notified = true;
       }
       it->socket.stop();
-      this->purge_client_(idx, &rx_accu8266);
+      this->purge_client_(idx, &this->rx_accu8266_);
       ++it;
       continue;
     }
@@ -520,7 +522,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       ESP_LOGW(TAG, "TCP timeout client_id=%u", (unsigned)idx);
       it->socket.stop();
       it->disconnect_notified = true;
-      this->purge_client_(idx, &rx_accu8266);
+      this->purge_client_(idx, &this->rx_accu8266_);
       ++it;
       continue;
     }
@@ -531,15 +533,15 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       int r = it->socket.read(this->temp_buffer_.data(), to_read);
       if (r > 0) {
         int client_fd = static_cast<int>(std::distance(this->clients_.begin(), it));
-        if (rx_accu8266.size() < this->clients_.size()) rx_accu8266.resize(this->clients_.size());
-        if (rx_accu8266[client_fd].capacity() < kTcpAccuCap8266) rx_accu8266[client_fd].reserve(kTcpAccuCap8266);
+        if (this->rx_accu8266_.size() < this->clients_.size()) this->rx_accu8266_.resize(this->clients_.size());
+        if (this->rx_accu8266_[client_fd].capacity() < kTcpAccuCap8266) this->rx_accu8266_[client_fd].reserve(kTcpAccuCap8266);
         // Append incoming data
-        rx_accu8266[client_fd].insert(rx_accu8266[client_fd].end(), this->temp_buffer_.begin(), this->temp_buffer_.begin() + r);
-        process_accu(rx_accu8266[client_fd], client_fd,
+        this->rx_accu8266_[client_fd].insert(this->rx_accu8266_[client_fd].end(), this->temp_buffer_.begin(), this->temp_buffer_.begin() + r);
+        process_accu(this->rx_accu8266_[client_fd], client_fd,
                      [&](const uint8_t *buf, size_t flen, int slot){ handle_tcp_payload(buf, flen, slot); });
         // Cap accumulator size to avoid growth on garbage
         const size_t kMaxAccu8266 = kTcpAccuCap8266;
-        if (rx_accu8266[client_fd].size() > kMaxAccu8266) rx_accu8266[client_fd].clear();
+        if (this->rx_accu8266_[client_fd].size() > kMaxAccu8266) this->rx_accu8266_[client_fd].clear();
         this->clients_[client_fd].disconnect_notified = false; // receiving traffic confirms connection
         it->last_activity = millis();
       }
@@ -548,15 +550,13 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
     ++it;
   }
 #elif defined(USE_ESP32)
-  static std::vector<std::vector<uint8_t>> rx_accu; // per-client TCP accumulator
+  // Per-instance RX accumulator
+  if (this->rx_accu_.size() != this->clients_.size()) this->rx_accu_.assign(this->clients_.size(), {});
+  for (auto &v : this->rx_accu_) if (v.capacity() < kTcpAccuCap) v.reserve(kTcpAccuCap);
   if (this->sock_ < 0) {
-    for (auto &v : rx_accu) v.clear();
+    for (auto &v : this->rx_accu_) v.clear();
     return; // keep accepting/reading even when requests are pending
   }
-
-  // Ensure accumulator vector matches clients_ size
-  if (rx_accu.size() != this->clients_.size()) rx_accu.assign(this->clients_.size(), {});
-  for (auto &v : rx_accu) if (v.capacity() < kTcpAccuCap) v.reserve(kTcpAccuCap);
 
   const size_t allowed_clients = this->tcp_allowed_clients_;
 
@@ -571,7 +571,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
     auto &c = this->clients_[idx];
     if (idx >= allowed_clients) {
       if (c.fd >= 0) { // over the configured limit → close
-        if (idx < rx_accu.size()) rx_accu[idx].clear();
+        if (idx < this->rx_accu_.size()) this->rx_accu_[idx].clear();
         close(c.fd);
         c.fd = -1;
       }
@@ -580,7 +580,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
     if (c.fd >= 0) {
       if (now - c.last_activity > this->tcp_client_timeout_ms_) {
         ESP_LOGW(TAG, "TCP timeout client_id=%zu", idx);
-        this->purge_client_(idx, &rx_accu);
+        this->purge_client_(idx, &this->rx_accu_);
         close(c.fd);
         c.fd = -1;
         continue;
@@ -615,7 +615,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
               existing_addr.sin_port == client_addr.sin_port) {
             // Reuse the existing slot: replace old fd with new one
             size_t idx = static_cast<size_t>(&c - &this->clients_[0]);
-            this->purge_client_(idx, &rx_accu);
+            this->purge_client_(idx, &this->rx_accu_);
             close(c.fd);
             c.fd = newfd;
             c.last_activity = millis();
@@ -682,7 +682,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
               }
             }
             if (victim != SIZE_MAX) {
-              this->purge_client_(victim, &rx_accu);
+              this->purge_client_(victim, &this->rx_accu_);
               close(this->clients_[victim].fd);
               this->clients_[victim].fd = newfd;
               this->clients_[victim].last_activity = millis();
@@ -707,7 +707,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       int r = recv(c.fd, this->temp_buffer_.data(), this->temp_buffer_.size(), 0);
       if (r == 0) {
         ESP_LOGI(TAG, "TCP disconnect client_id=%zu", i);
-        this->purge_client_(i, &rx_accu);
+        this->purge_client_(i, &this->rx_accu_);
         close(c.fd);
         c.fd = -1;
         continue; 
@@ -715,7 +715,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       if (r < 0) {
         if (errno != EWOULDBLOCK && errno != EAGAIN) {
           ESP_LOGW(TAG, "TCP error client_id=%zu err=%s", i, strerror(errno));
-          this->purge_client_(i, &rx_accu);
+          this->purge_client_(i, &this->rx_accu_);
           close(c.fd);
           c.fd = -1;
         }
@@ -724,13 +724,13 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       if (r > 0) {
         size_t idx = i;
         // Append incoming bytes to accumulator
-        rx_accu[idx].insert(rx_accu[idx].end(), this->temp_buffer_.begin(), this->temp_buffer_.begin() + r);
-        process_accu(rx_accu[idx], static_cast<int>(idx),
+        this->rx_accu_[idx].insert(this->rx_accu_[idx].end(), this->temp_buffer_.begin(), this->temp_buffer_.begin() + r);
+        process_accu(this->rx_accu_[idx], static_cast<int>(idx),
                      [&](const uint8_t *buf, size_t flen, int slot){ handle_tcp_payload(buf, flen, slot); });
         // Prevent unbounded growth in pathological cases (drop oldest data)
         const size_t kMaxAccu = kTcpAccuCap;
-        if (rx_accu[idx].size() > kMaxAccu) {
-          rx_accu[idx].clear();
+        if (this->rx_accu_[idx].size() > kMaxAccu) {
+          this->rx_accu_[idx].clear();
         }
         c.last_activity = now;
       }
