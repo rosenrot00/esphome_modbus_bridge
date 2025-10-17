@@ -31,9 +31,6 @@ struct TCPClient {
   int fd = -1;
   uint32_t last_activity = 0;
 };
-std::vector<std::vector<uint8_t>> rx_accu_;
-#elif defined(USE_ESP8266)
-std::vector<std::vector<uint8_t>> rx_accu8266_;
 #endif
 
 struct PendingRequest {
@@ -79,10 +76,13 @@ class ModbusBridgeComponent : public Component {
   int sock_{-1};
 #ifdef USE_ESP32
   std::vector<TCPClient> clients_;
-#elif defined(USE_ESP8266)
+ #if defined(USE_ESP32)
+  std::vector<std::vector<uint8_t>> rx_accu_;
+ #elif defined(USE_ESP8266)
   WiFiServer server_{502};
   std::vector<TCPClient8266> clients_;
-#endif
+  std::vector<std::vector<uint8_t>> rx_accu8266_;
+ #endif
   std::deque<PendingRequest> pending_requests_;
   uint16_t tcp_port_{502};
   bool debug_{false};
