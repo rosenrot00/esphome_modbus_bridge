@@ -74,15 +74,14 @@ class ModbusBridgeComponent : public Component {
  protected:
   uart::UARTComponent *uart_{nullptr};
   int sock_{-1};
-#ifdef USE_ESP32
+#if defined(USE_ESP32)
   std::vector<TCPClient> clients_;
- #if defined(USE_ESP32)
   std::vector<std::vector<uint8_t>> rx_accu_;
- #elif defined(USE_ESP8266)
+#elif defined(USE_ESP8266)
   WiFiServer server_{502};
   std::vector<TCPClient8266> clients_;
   std::vector<std::vector<uint8_t>> rx_accu8266_;
- #endif
+#endif
   std::deque<PendingRequest> pending_requests_;
   uint16_t tcp_port_{502};
   bool debug_{false};
