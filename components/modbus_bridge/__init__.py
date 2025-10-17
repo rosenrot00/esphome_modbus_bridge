@@ -14,7 +14,7 @@ CONF_FLOW_CONTROL_PIN = "flow_control_pin"
 modbus_bridge_ns = cg.esphome_ns.namespace('modbus_bridge')
 ModbusBridgeComponent = modbus_bridge_ns.class_('ModbusBridgeComponent', cg.Component)
 
-CONFIG_SCHEMA = cv.Schema({
+BASE_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(ModbusBridgeComponent),
     cv.Required("uart_id"): cv.use_id(uart.UARTComponent),
     cv.Optional(CONF_FLOW_CONTROL_PIN): pins.gpio_output_pin_schema,
@@ -25,19 +25,23 @@ CONFIG_SCHEMA = cv.Schema({
     cv.Optional(CONF_TCP_ALLOWED_CLIENTS, default=4): cv.positive_int,
 }).extend(cv.COMPONENT_SCHEMA)
 
-async def to_code(config):
-    var = cg.new_Pvariable(config[CONF_ID])
-    await cg.register_component(var, config)
+# Allow a list of bridge definitions under modbus_bridge:
+CONFIG_SCHEMA = cv.ensure_list(BASE_SCHEMA)
 
-    uart_comp = await cg.get_variable(config["uart_id"])
-    cg.add(var.set_uart_id(uart_comp))
-    cg.add(var.set_tcp_port(config[CONF_TCP_PORT]))
-    cg.add(var.set_tcp_poll_interval(config[CONF_TCP_POLL_INTERVAL]))
-    cg.add(var.set_tcp_client_timeout(config[CONF_TCP_CLIENT_TIMEOUT]))
-    cg.add(var.set_rtu_response_timeout(config[CONF_RTU_RESPONSE_TIMEOUT]))
-    cg.add(var.set_tcp_allowed_clients(config[CONF_TCP_ALLOWED_CLIENTS]))
-    
-    # optional RS-485 DE/RE (flow control) pin
-    if CONF_FLOW_CONTROL_PIN in config:
-        pin = await cg.gpio_pin_expression(config[CONF_FLOW_CONTROL_PIN])
-        cg.add(var.set_flow_control_pin(pin))
+async def to_code(config):
+    for conf in config:
+        var = cg.new_Pvariable(conf[CONF_ID])
+        await cg.register_component(var, conf)
+
+        uart_comp = await cg.get_variable(conf["uart_id"])
+        cg.add(var.set_uart_id(uart_comp))
+        cg.add(var.set_tcp_port(conf[CONF_TCP_PORT]))
+        cg.add(var.set_tcp_poll_interval(conf[CONF_TCP_POLL_INTERVAL]))
+        cg.add(var.set_tcp_client_timeout(conf[CONF_TCP_CLIENT_TIMEOUT]))
+        cg.add(var.set_rtu_response_timeout(conf[CONF_RTU_RESPONSE_TIMEOUT]))
+        cg.add(var.set_tcp_allowed_clients(conf[CONF_TCP_ALLOWED_CLIENTS]))
+
+        # optional RS-485 DE/RE flow control pin
+        if CONF_FLOW_CONTROL_PIN in conf:
+            pin = await cg.gpio_pin_expression(conf[CONF_FLOW_CONTROL_PIN])
+            cg.add(var.set_flow_control_pin(pin))
