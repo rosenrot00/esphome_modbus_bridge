@@ -779,24 +779,33 @@ void ModbusBridgeComponent::poll_uart_response_() {
     this->polling_active_ = false;
   };
 
+  size_t before = pending.response.size();
   size_t avail = this->uart_->available();
   if (avail) {
     pending.response.reserve(pending.response.size() + avail);
     for (size_t i = 0; i < avail; ++i) {
       uint8_t b; if (this->uart_->read_byte(&b)) pending.response.push_back(b); else break;
     }
+    if (pending.response.size() > before) {
+      pending.last_change = millis();
+    }
   }
 
   size_t current_size = pending.response.size();
 
   if (current_size == 0) {
-    if (millis() - pending.start_time > this->rtu_response_timeout_ms_) {
+    const uint32_t first_byte_grace_ms = 100;
+    uint32_t dt = millis() - pending.start_time;
+    if (dt < first_byte_grace_ms) {
+      return; // keep waiting for first byte
+    }
+    if (dt > this->rtu_response_timeout_ms_) {
       g_timeouts++;
       ESP_LOGW(TAG, "Modbus timeout: no response received (no first byte) client_id=%d", pending.client_fd);
       finish_request();
       return;
     }
-    return;
+    return; // grace elapsed but still within overall timeout
   }
 
   // --- End-of-frame detection by debounced Inter-Byte Gap (T1.5) ---
