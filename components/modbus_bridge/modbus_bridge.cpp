@@ -799,14 +799,19 @@ void ModbusBridgeComponent::poll_uart_response_() {
     return;
   }
 
-  // --- End-of-frame detection by Inter-Byte Gap (T1.5) only ---
+  // --- End-of-frame detection by debounced Inter-Byte Gap (T1.5) ---
   // Compute inter-byte timeout (T1.5). Use floor to avoid scheduler jitter at low baud.
   const uint32_t t15_ms = std::max<uint32_t>( (uint32_t)((this->char_time_us_ * 3) / 2 / 1000), 10 );
+  // Some UART drivers flush RX on very short idle gaps (~2 char times). To avoid
+  // prematurely finalizing large RTU frames that arrive in bursts, require a
+  // longer stable gap before we close the frame. Choose a conservative factor
+  // (e.g., 4× T1.5) with a minimum floor.
+  const uint32_t settle_ms = std::max<uint32_t>(t15_ms * 4, 24);
 
-  if (millis() - pending.last_change > t15_ms) {
+  if (millis() - pending.last_change > settle_ms) {
     if (this->debug_) {
       std::string debug_output = to_hex(pending.response);
-      ESP_LOGD(TAG, "RTU recv (gap T1.5, %d bytes): %s", (int)current_size, debug_output.c_str());
+      ESP_LOGD(TAG, "RTU recv (gap %.u ms, %d bytes): %s", (unsigned)settle_ms, (int)current_size, debug_output.c_str());
     }
     if (current_size < 3) {
       ESP_LOGW(TAG, "Invalid RTU response (<3 bytes) – dropping");
