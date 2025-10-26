@@ -814,8 +814,8 @@ void ModbusBridgeComponent::poll_uart_response_() {
   // Some UART drivers flush RX on very short idle gaps (~2 char times). To avoid
   // prematurely finalizing large RTU frames that arrive in bursts, require a
   // longer stable gap before we close the frame. Choose a conservative factor
-  // (e.g., 4× T1.5) with a minimum floor.
-  const uint32_t settle_ms = std::max<uint32_t>(t15_ms * 4, 24);
+  // (e.g., 3× T1.5) with a minimum floor.
+  const uint32_t settle_ms = std::max<uint32_t>(t15_ms * 3, 5);
 
   if (millis() - pending.last_change > settle_ms) {
     if (this->debug_) {
