@@ -799,39 +799,27 @@ void ModbusBridgeComponent::poll_uart_response_() {
     return;
   }
 
-  if (current_size < 3) {
-    ESP_LOGW(TAG, "Invalid response length: too short");
-    finish_request();
-    return;
-  }
+  // --- End-of-frame detection by Inter-Byte Gap (T1.5) only ---
+  // Compute inter-byte timeout (T1.5). Use floor to avoid scheduler jitter at low baud.
+  const uint32_t t15_ms = std::max<uint32_t>( (uint32_t)((this->char_time_us_ * 3) / 2 / 1000), 10 );
 
-  // Track changes in received data per request to reset timeout correctly
-  if (current_size != pending.last_size) {  // requires: size_t last_size in PendingRequest
-    pending.last_size = current_size;
-    pending.last_change = millis();
-  }
-
-  if (millis() - pending.last_change > this->rtu_inactivity_timeout_ms_) {
-  if (this->debug_) {
-    std::string debug_output = to_hex(pending.response);
-    ESP_LOGD(TAG, "RTU recv (%d bytes): %s", (int)current_size, debug_output.c_str());
-  }
-
-  if (current_size < 3) {
-    ESP_LOGW(TAG, "Invalid RTU response (<3 bytes) – dropping");
-    finish_request();
-    return;
-  }
-
-  std::vector<uint8_t> tcp_response;
-  build_tcp_from_rtu(pending, pending.response, tcp_response);
-
+  if (millis() - pending.last_change > t15_ms) {
+    if (this->debug_) {
+      std::string debug_output = to_hex(pending.response);
+      ESP_LOGD(TAG, "RTU recv (gap T1.5, %d bytes): %s", (int)current_size, debug_output.c_str());
+    }
+    if (current_size < 3) {
+      ESP_LOGW(TAG, "Invalid RTU response (<3 bytes) – dropping");
+      finish_request();
+      return;
+    }
+    std::vector<uint8_t> tcp_response;
+    build_tcp_from_rtu(pending, pending.response, tcp_response);
     if (this->debug_) {
       std::string tcp_debug = to_hex(tcp_response);
       ESP_LOGD(TAG, "RTU->TCP response: %s", tcp_debug.c_str());
       ESP_LOGD(TAG, "Response time: %ums", millis() - pending.start_time);
     }
-
     this->send_to_client_(pending.client_fd, tcp_response.data(), tcp_response.size());
     g_frames_out++;
     finish_request();
@@ -840,7 +828,8 @@ void ModbusBridgeComponent::poll_uart_response_() {
 
   if (millis() - pending.start_time > this->rtu_response_timeout_ms_) {
     g_timeouts++;
-    ESP_LOGW(TAG, "Modbus timeout: response incomplete. client_id=%d", pending.client_fd);
+    ESP_LOGW(TAG, "Modbus timeout: response incomplete. Dropping. client_id=%d", pending.client_fd);
+    INC(g_drops_len);
     finish_request();
     return;
   }
