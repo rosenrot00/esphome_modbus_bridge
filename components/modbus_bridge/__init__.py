@@ -3,7 +3,7 @@ import esphome.codegen as cg
 from esphome.components import uart
 from esphome.const import CONF_ID
 from esphome import pins
-from esphome.components import automation
+from esphome import automation
 from esphome.const import CONF_TRIGGER_ID
 
 CONF_TCP_PORT = "tcp_port"
