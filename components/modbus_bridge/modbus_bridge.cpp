@@ -70,6 +70,19 @@ static inline void drain_uart_rx(U *u) {
   uint8_t b; while (u && u->available()) u->read_byte(&b);
 }
 
+// Extracts Modbus PDU function code from an RTU frame (UID + PDU + CRC)
+static inline uint8_t pdu_fc_from_rtu_(const std::vector<uint8_t> &rtu) {
+  // rtu[0] = UID, rtu[1] = FC
+  return rtu.size() >= 2 ? rtu[1] : 0;
+}
+
+// Extracts start address from common request PDUs (0x01..0x04, 0x05, 0x06, 0x0F, 0x10)
+static inline uint16_t start_addr_from_rtu_(const std::vector<uint8_t> &rtu) {
+  // For standard requests, start address is at PDU bytes [1..2] → RTU [2], [3]
+  if (rtu.size() >= 4) return (uint16_t(rtu[2]) << 8) | rtu[3];
+  return 0;
+}
+
 using FrameHandler = std::function<void(const uint8_t*, size_t, int)>;
 
 // Build Modbus TCP response from an RTU response
@@ -388,9 +401,15 @@ void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, 
     drain_uart_rx(this->uart_);
     this->rs485_begin_tx_();
     this->uart_->write_array(rtu);
-    this->uart_->flush();         
-    this->rs485_end_tx_();         
+    this->uart_->flush();
+    this->rs485_end_tx_();
     this->start_uart_polling_();
+    // Fire command-sent trigger (bridge-global)
+    {
+      uint8_t fc = pdu_fc_from_rtu_(rtu);
+      uint16_t addr = start_addr_from_rtu_(rtu);
+      this->command_sent_cb_.call((int)fc, (int)addr); // Bridge-global event: command sent
+    }
   }
 }
 
@@ -752,6 +771,18 @@ void ModbusBridgeComponent::poll_uart_response_() {
   }
   PendingRequest &pending = this->pending_requests_.front();
 
+  // Helper: on timeout, emit on_timeout and (first time) on_offline, count consecutive timeouts
+  auto fire_timeout_and_maybe_offline = [&]() {
+    uint8_t fc = pdu_fc_from_rtu_(pending.rtu_data);
+    uint16_t addr = start_addr_from_rtu_(pending.rtu_data);
+    this->timeout_cb_.call((int)fc, (int)addr); // Bridge-global event: timeout
+    if (!this->module_offline_) {
+      this->module_offline_ = true;       // global bridge offline state
+      this->offline_cb_.call((int)fc, (int)addr); // Bridge transitioned offline after timeout
+    }
+    this->consecutive_timeouts_++;
+  };
+
   auto finish_request = [&]() {
     if (!this->pending_requests_.empty()) this->pending_requests_.pop_front();
     // Find the next valid request whose client is still connected
@@ -772,6 +803,12 @@ void ModbusBridgeComponent::poll_uart_response_() {
       this->rs485_end_tx_();
       if (this->debug_) {
         ESP_LOGD(TAG, "RTU send: %s client_id=%d", to_hex(next.rtu_data).c_str(), next.client_fd);
+      }
+      // Fire command-sent trigger for the next queued request
+      {
+        uint8_t fc2 = pdu_fc_from_rtu_(next.rtu_data);
+        uint16_t addr2 = start_addr_from_rtu_(next.rtu_data);
+        this->command_sent_cb_.call((int)fc2, (int)addr2); // Bridge-global event: command sent (next queued)
       }
       return; // keep polling_active_ true
     }
@@ -802,6 +839,7 @@ void ModbusBridgeComponent::poll_uart_response_() {
     if (dt > this->rtu_response_timeout_ms_) {
       g_timeouts++;
       ESP_LOGW(TAG, "Modbus timeout: no response received (no first byte) client_id=%d", pending.client_fd);
+      fire_timeout_and_maybe_offline();
       finish_request();
       return;
     }
@@ -827,6 +865,14 @@ void ModbusBridgeComponent::poll_uart_response_() {
       finish_request();
       return;
     }
+    // If we were previously offline, mark the bridge online again on first valid response
+    if (this->module_offline_) {
+      this->module_offline_ = false;  // global bridge back online
+      uint8_t fc = pdu_fc_from_rtu_(pending.rtu_data);
+      uint16_t addr = start_addr_from_rtu_(pending.rtu_data);
+      this->online_cb_.call((int)fc, (int)addr); // Bridge became online
+    }
+    this->consecutive_timeouts_ = 0;
     std::vector<uint8_t> tcp_response;
     build_tcp_from_rtu(pending, pending.response, tcp_response);
     if (this->debug_) {
@@ -844,6 +890,7 @@ void ModbusBridgeComponent::poll_uart_response_() {
     g_timeouts++;
     ESP_LOGW(TAG, "Modbus timeout: response incomplete. Dropping. client_id=%d", pending.client_fd);
     INC(g_drops_len);
+    fire_timeout_and_maybe_offline();
     finish_request();
     return;
   }
