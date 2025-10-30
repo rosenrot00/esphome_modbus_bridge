@@ -9,6 +9,7 @@
 #include <initializer_list>
 #include <cstring>
 #include <deque>
+#include "esphome/core/callback_manager.h"  // CallbackManager
 
 #ifdef USE_ESP8266
 #include <ESP8266WiFi.h>
@@ -69,6 +70,12 @@ class ModbusBridgeComponent : public Component {
   // NEW – optional RS-485 DE/RE control pin (only used if set)
   void set_flow_control_pin(GPIOPin *pin) { flow_control_pin_ = pin; }
 
+  // Bridge-global automation adders (events carry function_code and start_address)
+  void add_on_command_sent_callback(std::function<void(int, int)> &&cb) { command_sent_cb_.add(std::move(cb)); }
+  void add_on_online_callback(std::function<void(int, int)> &&cb)       { online_cb_.add(std::move(cb)); }
+  void add_on_offline_callback(std::function<void(int, int)> &&cb)      { offline_cb_.add(std::move(cb)); }
+  void add_on_timeout_callback(std::function<void(int, int)> &&cb)      { timeout_cb_.add(std::move(cb)); }
+
   void setup() override;
 
  protected:
@@ -101,6 +108,16 @@ class ModbusBridgeComponent : public Component {
 
   // NEW – optional RS-485 DE/RE pin
   GPIOPin *flow_control_pin_{nullptr};
+
+  // Bridge-global event callbacks
+  esphome::CallbackManager<void(int, int)> command_sent_cb_;
+  esphome::CallbackManager<void(int, int)> online_cb_;
+  esphome::CallbackManager<void(int, int)> offline_cb_;
+  esphome::CallbackManager<void(int, int)> timeout_cb_;
+
+  // Bridge-wide online/offline state and counters
+  bool module_offline_{false};
+  uint16_t consecutive_timeouts_{0};
 
   void start_uart_polling_();
   void append_crc(std::vector<uint8_t> &data);
