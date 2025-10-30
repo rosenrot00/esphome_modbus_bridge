@@ -4,6 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting a
 
 | Version   | Changes                                                                           |
 |-----------|-----------------------------------------------------------------------------------|
+| 2025.10.3 | Added automations for online, offline, timeout, command_sent                      |
 | 2025.10.2 | Introduced T1.5 waiting time for better modbus rtu frame detection on lower bauds |
 | 2025.10.1 | Implemented support for multiple bridges to be used with multiple UART interfaces |
 | 2025.09.1 | Added configurable `flow_control_pin` with inverted option                        |
@@ -86,6 +87,49 @@ modbus_bridge:
   #flow_control_pin:           # (detailed, mode/output/open_drain also possible)
     #number: GPIO18
     #inverted: false
+
+  #on_command_sent:        # fires for every RTU command sent
+  #  then:
+  #    - lambda: |-
+  #        ESP_LOGD("mb_bridge", "Cmd sent – FC=%d addr=%d", function_code, address);
+  #    - light.turn_on: led_blue
+  #    - delay: 100ms
+  #    - light.turn_off: led_blue
+
+  #on_timeout:             # fires for each timed-out request
+  #  then:
+  #    - lambda: |-
+  #        ESP_LOGW("mb_bridge", "Timeout – FC=%d addr=%d", function_code, address);
+  #    - light.turn_on: led_yellow
+  #    - delay: 400ms
+  #    - light.turn_off: led_yellow
+
+  #on_offline:             # fires once when going from online → offline
+  #  then:
+  #    - lambda: |-
+  #        ESP_LOGE("mb_bridge", "Bridge OFFLINE – FC=%d addr=%d", function_code, address);
+  #    - light.turn_on: led_red
+
+  #on_online:              # fires once when recovering from offline
+  #  then:
+  #    - lambda: |-
+  #        ESP_LOGI("mb_bridge", "Bridge ONLINE – FC=%d addr=%d", function_code, address);
+  #    - light.turn_off: led_red
+  #    - light.turn_on: led_green
+  #    - delay: 200ms
+  #    - light.turn_off: led_green
+
+#output:
+#  - platform: gpio
+#    id: output_led_green
+#    pin: GPIO25
+#  ...
+
+#light:
+#  - platform: binary
+#    id: led_green
+#    output: output_led_green
+#  ...
 
 switch:
   - platform: template
