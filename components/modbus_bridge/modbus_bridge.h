@@ -9,7 +9,7 @@
 #include <initializer_list>
 #include <cstring>
 #include <deque>
-#include "esphome/core/callback_manager.h"  // CallbackManager
+#include "esphome/core/callback.h"
 
 #ifdef USE_ESP8266
 #include <ESP8266WiFi.h>
