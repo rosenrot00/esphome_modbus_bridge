@@ -67,7 +67,7 @@ async def to_code(config):
                 for ac in conf[list_key]:
                     trig = cg.new_Pvariable(ac[CONF_TRIGGER_ID])
                     # C++ lambda triggers the automation with (function_code, address)
-                    cb = cg.lambda_(f"[](int fc, int addr) {{ {trig}.trigger(fc, addr); }}")
+                    cb = cg.RawExpression(f"[](int fc, int addr) {{ {trig}.trigger(fc, addr); }}")
                     cg.add(getattr(var, adder)(cb))
                     await automation.build_automation(trig, [(cg.int_, "function_code"), (cg.int_, "address")], ac)
 
