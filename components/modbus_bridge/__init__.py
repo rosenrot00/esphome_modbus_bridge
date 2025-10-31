@@ -32,16 +32,16 @@ BASE_SCHEMA = cv.Schema({
     cv.Optional(CONF_TCP_ALLOWED_CLIENTS, default=4): cv.positive_int,
     # Expose bridge-global events to YAML automations
     cv.Optional(CONF_ON_COMMAND_SENT): automation.validate_automation({
-        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger)
+        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template(cg.int_, cg.int_))
     }),
     cv.Optional(CONF_ON_ONLINE): automation.validate_automation({
-        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger)
+        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template(cg.int_, cg.int_))
     }),
     cv.Optional(CONF_ON_OFFLINE): automation.validate_automation({
-        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger)
+        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template(cg.int_, cg.int_))
     }),
     cv.Optional(CONF_ON_TIMEOUT): automation.validate_automation({
-        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger)
+        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template(cg.int_, cg.int_))
     }),
 }).extend(cv.COMPONENT_SCHEMA)
 
@@ -67,7 +67,7 @@ async def to_code(config):
                 for ac in conf[list_key]:
                     trig = cg.new_Pvariable(ac[CONF_TRIGGER_ID])
                     # C++ lambda triggers the automation with (function_code, address)
-                    cb = cg.RawExpression(f"[](int fc, int addr) {{ {trig}.trigger(fc, addr); }}")
+                    cb = cg.RawExpression(f"[](int fc, int addr) {{ {trig}->trigger(fc, addr); }}")
                     cg.add(getattr(var, adder)(cb))
                     await automation.build_automation(trig, [(cg.int_, "function_code"), (cg.int_, "address")], ac)
 
