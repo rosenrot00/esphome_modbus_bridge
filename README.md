@@ -131,7 +131,7 @@ interval:
                   - light.turn_on: led_status
                   - delay: 100ms
                   - light.turn_off: led_status
-                  - delay: 200ms  # short pause between blinks
+                  - delay: 100ms  # short pause between blinks
 
 # Debug switch for enabling verbose Modbus logging
 switch:
