@@ -14,9 +14,12 @@ CONF_TCP_ALLOWED_CLIENTS = "tcp_allowed_clients"
 CONF_FLOW_CONTROL_PIN = "flow_control_pin"
 
 CONF_ON_COMMAND_SENT = "on_command_sent"
-CONF_ON_ONLINE = "on_online"
-CONF_ON_OFFLINE = "on_offline"
-CONF_ON_TIMEOUT = "on_timeout"
+CONF_ON_RTU_SEND = "on_rtu_send"
+CONF_ON_RTU_RECEIVE = "on_rtu_receive"
+CONF_ON_RTU_TIMEOUT = "on_rtu_timeout"
+CONF_ON_TCP_STARTED = "on_tcp_started"
+CONF_ON_TCP_STOPPED = "on_tcp_stopped"
+CONF_ON_TCP_CLIENTS_CHANGED = "on_tcp_clients_changed"
 
 modbus_bridge_ns = cg.esphome_ns.namespace('modbus_bridge')
 ModbusBridgeComponent = modbus_bridge_ns.class_('ModbusBridgeComponent', cg.Component)
@@ -34,14 +37,23 @@ BASE_SCHEMA = cv.Schema({
     cv.Optional(CONF_ON_COMMAND_SENT): automation.validate_automation({
         cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template(cg.int_, cg.int_))
     }),
-    cv.Optional(CONF_ON_ONLINE): automation.validate_automation({
+    cv.Optional(CONF_ON_RTU_SEND): automation.validate_automation({
         cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template(cg.int_, cg.int_))
     }),
-    cv.Optional(CONF_ON_OFFLINE): automation.validate_automation({
+    cv.Optional(CONF_ON_RTU_RECEIVE): automation.validate_automation({
         cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template(cg.int_, cg.int_))
     }),
-    cv.Optional(CONF_ON_TIMEOUT): automation.validate_automation({
+    cv.Optional(CONF_ON_RTU_TIMEOUT): automation.validate_automation({
         cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template(cg.int_, cg.int_))
+    }),
+    cv.Optional(CONF_ON_TCP_STARTED): automation.validate_automation({
+        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template())
+    }),
+    cv.Optional(CONF_ON_TCP_STOPPED): automation.validate_automation({
+        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template())
+    }),
+    cv.Optional(CONF_ON_TCP_CLIENTS_CHANGED): automation.validate_automation({
+        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template(cg.int_))
     }),
 }).extend(cv.COMPONENT_SCHEMA)
 
@@ -72,9 +84,32 @@ async def to_code(config):
                     await automation.build_automation(trig, [(cg.int_, "function_code"), (cg.int_, "address")], ac)
 
         await _bind(CONF_ON_COMMAND_SENT, "add_on_command_sent_callback")
-        await _bind(CONF_ON_ONLINE,       "add_on_online_callback")
-        await _bind(CONF_ON_OFFLINE,      "add_on_offline_callback")
-        await _bind(CONF_ON_TIMEOUT,      "add_on_timeout_callback")
+        # RTU-centric events
+        await _bind(CONF_ON_RTU_SEND,    "add_on_command_sent_callback")   # alias: RTU send
+        await _bind(CONF_ON_RTU_RECEIVE, "add_on_rtu_receive_callback")
+        await _bind(CONF_ON_RTU_TIMEOUT, "add_on_rtu_timeout_callback")
+
+        # Bind simple no-arg TCP server events
+        if CONF_ON_TCP_STARTED in conf:
+            for ac in conf[CONF_ON_TCP_STARTED]:
+                trig = cg.new_Pvariable(ac[CONF_TRIGGER_ID])
+                cb = cg.RawExpression(f"[]() {{ {trig}->trigger(); }}")
+                cg.add(var.add_on_tcp_started_callback(cb))
+                await automation.build_automation(trig, [], ac)
+
+        if CONF_ON_TCP_STOPPED in conf:
+            for ac in conf[CONF_ON_TCP_STOPPED]:
+                trig = cg.new_Pvariable(ac[CONF_TRIGGER_ID])
+                cb = cg.RawExpression(f"[]() {{ {trig}->trigger(); }}")
+                cg.add(var.add_on_tcp_stopped_callback(cb))
+                await automation.build_automation(trig, [], ac)
+
+        if CONF_ON_TCP_CLIENTS_CHANGED in conf:
+            for ac in conf[CONF_ON_TCP_CLIENTS_CHANGED]:
+                trig = cg.new_Pvariable(ac[CONF_TRIGGER_ID])
+                cb = cg.RawExpression(f"[](int count) {{ {trig}->trigger(count); }}")
+                cg.add(var.add_on_tcp_clients_changed_callback(cb))
+                await automation.build_automation(trig, [(cg.int_, "count")], ac)
 
         # optional RS-485 DE/RE flow control pin
         if CONF_FLOW_CONTROL_PIN in conf:
