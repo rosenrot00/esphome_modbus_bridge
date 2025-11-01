@@ -216,32 +216,42 @@ void ModbusBridgeComponent::setup() {
     this->flow_control_pin_->digital_write(false); // RX mode (DE/RE low)
   }
 
-  this->set_interval("tcp_server_and_network_check", 1000, [this]() {
-    if (this->sock_ < 0 && network::is_connected()) {
-      ESP_LOGI(TAG, "IP available – initializing TCP server");
-      this->initialize_tcp_server_();
-    } else if (this->sock_ >= 0 && !network::is_connected()) {
-      ESP_LOGW(TAG, "Lost network IP – closing TCP server");
+    this->set_interval("tcp_server_and_network_check", 1000, [this]() {
+      if (this->sock_ < 0 && network::is_connected()) {
+        ESP_LOGI(TAG, "IP available – initializing TCP server");
+        this->initialize_tcp_server_();
+      } else if (this->sock_ >= 0 && !network::is_connected()) {
+        ESP_LOGW(TAG, "Lost network IP – closing TCP server");
 #if defined(USE_ESP8266)
-      this->server_.stop();
+        this->server_.stop();
 #elif defined(USE_ESP32)
-      close(this->sock_);
+        close(this->sock_);
 #endif
-      this->sock_ = -1;
-      // Also close all active clients and clear per-client state
+        this->sock_ = -1;
+        // TCP event: stopped (guarded for idempotency)
+        if (this->tcp_server_running_) {
+          this->tcp_server_running_ = false;
+          this->tcp_stopped_cb_.call();
+        }
+        // Notify clients changed → 0 when server stops
+        if (this->tcp_client_count_ != 0) {
+          this->tcp_client_count_ = 0;
+          this->tcp_clients_changed_cb_.call(0);
+        }
+        // Also close all active clients and clear per-client state
 #if defined(USE_ESP8266)
-      for (auto &cl : this->clients_) {
-        if (cl.socket.connected()) cl.socket.stop();
-      }
-      // Accumulators are static in check_tcp_sockets_() and will be cleared there when sock_ < 0
+        for (auto &cl : this->clients_) {
+          if (cl.socket.connected()) cl.socket.stop();
+        }
+        // Accumulators are static in check_tcp_sockets_() and will be cleared there when sock_ < 0
 #elif defined(USE_ESP32)
-      for (auto &cl : this->clients_) {
-        if (cl.fd >= 0) { close(cl.fd); cl.fd = -1; }
-      }
-      // Accumulators are static in check_tcp_sockets_() and will be cleared there when sock_ < 0
+        for (auto &cl : this->clients_) {
+          if (cl.fd >= 0) { close(cl.fd); cl.fd = -1; }
+        }
+        // Accumulators are static in check_tcp_sockets_() and will be cleared there when sock_ < 0
 #endif
-    }
-  });
+      }
+    });
 
   this->set_interval("tcp_poll", this->tcp_poll_interval_ms_, [this]() {
     this->check_tcp_sockets_();
@@ -275,11 +285,16 @@ void ModbusBridgeComponent::setup() {
 
 
 void ModbusBridgeComponent::initialize_tcp_server_() {
-#if defined(USE_ESP8266)
+ #if defined(USE_ESP8266)
   this->server_ = WiFiServer(this->tcp_port_);
   this->server_.begin();
   this->sock_ = 1;  // Dummywert für „Server läuft“
   ESP_LOGI(TAG, "TCP server started on %s:%d", WiFi.localIP().toString().c_str(), this->tcp_port_);
+  // TCP event: started (guarded for idempotency)
+  if (!this->tcp_server_running_) {
+    this->tcp_server_running_ = true;
+    this->tcp_started_cb_.call();
+  }
 #elif defined(USE_ESP32)
   this->sock_ = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
   if (this->sock_ < 0) {
@@ -309,6 +324,11 @@ void ModbusBridgeComponent::initialize_tcp_server_() {
     ESP_LOGI(TAG, "TCP server started on %s:%d", ips[0].str().c_str(), this->tcp_port_);
   } else {
     ESP_LOGI(TAG, "TCP server started, but no IP address found");
+  }
+  // TCP event: started (guarded for idempotency)
+  if (!this->tcp_server_running_) {
+    this->tcp_server_running_ = true;
+    this->tcp_started_cb_.call();
   }
 
   // (Removed duplicate fd initialization)
@@ -414,13 +434,21 @@ void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, 
 }
 
 void ModbusBridgeComponent::check_tcp_sockets_() {
-#if defined(USE_ESP8266)
+ #if defined(USE_ESP8266)
   // Per-instance RX accumulator
   if (this->rx_accu8266_.size() < this->clients_.size())
     this->rx_accu8266_.resize(this->clients_.size());
   if (this->sock_ < 0) {
     for (auto &v : this->rx_accu8266_) v.clear();
   }
+  auto update_tcp_client_count = [this]() {
+    int cnt = 0;
+    for (auto &cl : this->clients_) if (cl.socket.connected()) ++cnt;
+    if (cnt != this->tcp_client_count_) {
+      this->tcp_client_count_ = cnt;
+      this->tcp_clients_changed_cb_.call(cnt);
+    }
+  };
   WiFiClient new_client = this->server_.accept();
   const size_t allowed_clients = this->tcp_allowed_clients_;
   if (new_client) {
@@ -439,6 +467,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
         ex.socket.setTimeout(10);
         ex.last_activity = millis();
         ex.disconnect_notified = false;
+        update_tcp_client_count();
         duplicate = true;
         break;
       }
@@ -465,6 +494,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
           this->clients_[idx].disconnect_notified = false;
           ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d", new_client.remoteIP().toString().c_str(), (unsigned)new_client.remotePort(), (int)idx);
           g_clients_connected++;
+          update_tcp_client_count();
           placed = true;
           break;
         }
@@ -483,6 +513,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
           this->clients_.back().disconnect_notified = false;
           ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d", new_client.remoteIP().toString().c_str(), (unsigned)new_client.remotePort(), (int)(this->clients_.size() - 1));
           g_clients_connected++;
+          update_tcp_client_count();
         } else {
           bool preempted = false;
           if (kPreemptSameIP) {
@@ -509,6 +540,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
               this->clients_[victim].disconnect_notified = false;
               INC(g_preempt_events);
               INC(g_clients_connected);
+              update_tcp_client_count();
               //ESP_LOGI(TAG, "TCP preempt same-ip client_id=%u", (unsigned)victim);
               preempted = true;
             }
@@ -532,6 +564,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       }
       it->socket.stop();
       this->purge_client_(idx, &this->rx_accu8266_);
+      update_tcp_client_count();
       ++it;
       continue;
     }
@@ -542,6 +575,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       it->socket.stop();
       it->disconnect_notified = true;
       this->purge_client_(idx, &this->rx_accu8266_);
+      update_tcp_client_count();
       ++it;
       continue;
     }
@@ -568,7 +602,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
 
     ++it;
   }
-#elif defined(USE_ESP32)
+ #elif defined(USE_ESP32)
   // Per-instance RX accumulator
   if (this->rx_accu_.size() != this->clients_.size()) this->rx_accu_.assign(this->clients_.size(), {});
   for (auto &v : this->rx_accu_) if (v.capacity() < kTcpAccuCap) v.reserve(kTcpAccuCap);
@@ -576,6 +610,15 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
     for (auto &v : this->rx_accu_) v.clear();
     return; // keep accepting/reading even when requests are pending
   }
+
+  auto update_tcp_client_count = [this]() {
+    int cnt = 0;
+    for (auto &cl : this->clients_) if (cl.fd >= 0) ++cnt;
+    if (cnt != this->tcp_client_count_) {
+      this->tcp_client_count_ = cnt;
+      this->tcp_clients_changed_cb_.call(cnt);
+    }
+  };
 
   const size_t allowed_clients = this->tcp_allowed_clients_;
 
@@ -593,6 +636,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
         if (idx < this->rx_accu_.size()) this->rx_accu_[idx].clear();
         close(c.fd);
         c.fd = -1;
+        update_tcp_client_count();
       }
       continue;
     }
@@ -602,6 +646,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
         this->purge_client_(idx, &this->rx_accu_);
         close(c.fd);
         c.fd = -1;
+        update_tcp_client_count();
         continue;
       }
       FD_SET(c.fd, &read_fds);
@@ -638,6 +683,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
             close(c.fd);
             c.fd = newfd;
             c.last_activity = millis();
+            update_tcp_client_count();
             duplicate = true;
             break;
           }
@@ -679,6 +725,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
             c.last_activity = millis();
             ESP_LOGI(TAG, "TCP connect %s:%d client_id=%zu", client_ip, ntohs(client_addr.sin_port), idx);
             g_clients_connected++;
+            update_tcp_client_count();
             accepted = true;
             break;
           }
@@ -707,6 +754,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
               this->clients_[victim].last_activity = millis();
               INC(g_preempt_events);
               INC(g_clients_connected);
+              update_tcp_client_count();
               // no per-event log
               preempted = true;
             }
@@ -729,6 +777,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
         this->purge_client_(i, &this->rx_accu_);
         close(c.fd);
         c.fd = -1;
+        update_tcp_client_count();
         continue; 
       }
       if (r < 0) {
@@ -737,6 +786,7 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
           this->purge_client_(i, &this->rx_accu_);
           close(c.fd);
           c.fd = -1;
+          update_tcp_client_count();
         }
         continue;
       }
@@ -771,16 +821,11 @@ void ModbusBridgeComponent::poll_uart_response_() {
   }
   PendingRequest &pending = this->pending_requests_.front();
 
-  // Helper: on timeout, emit on_timeout and (first time) on_offline, count consecutive timeouts
-  auto fire_timeout_and_maybe_offline = [&]() {
+  // Helper: on timeout, emit RTU-timeout (request context)
+  auto fire_rtu_timeout = [&]() {
     uint8_t fc = pdu_fc_from_rtu_(pending.rtu_data);
     uint16_t addr = start_addr_from_rtu_(pending.rtu_data);
-    this->timeout_cb_.call((int)fc, (int)addr); // Bridge-global event: timeout
-    if (!this->module_offline_) {
-      this->module_offline_ = true;       // global bridge offline state
-      this->offline_cb_.call((int)fc, (int)addr); // Bridge transitioned offline after timeout
-    }
-    this->consecutive_timeouts_++;
+    this->rtu_timeout_cb_.call((int)fc, (int)addr);
   };
 
   auto finish_request = [&]() {
@@ -839,7 +884,7 @@ void ModbusBridgeComponent::poll_uart_response_() {
     if (dt > this->rtu_response_timeout_ms_) {
       g_timeouts++;
       ESP_LOGW(TAG, "Modbus timeout: no response received (no first byte) client_id=%d", pending.client_fd);
-      fire_timeout_and_maybe_offline();
+      fire_rtu_timeout();
       finish_request();
       return;
     }
@@ -865,14 +910,12 @@ void ModbusBridgeComponent::poll_uart_response_() {
       finish_request();
       return;
     }
-    // If we were previously offline, mark the bridge online again on first valid response
-    if (this->module_offline_) {
-      this->module_offline_ = false;  // global bridge back online
+    // Bridge-global event: RTU frame received (request context)
+    {
       uint8_t fc = pdu_fc_from_rtu_(pending.rtu_data);
       uint16_t addr = start_addr_from_rtu_(pending.rtu_data);
-      this->online_cb_.call((int)fc, (int)addr); // Bridge became online
+      this->rtu_receive_cb_.call((int)fc, (int)addr);
     }
-    this->consecutive_timeouts_ = 0;
     std::vector<uint8_t> tcp_response;
     build_tcp_from_rtu(pending, pending.response, tcp_response);
     if (this->debug_) {
@@ -890,7 +933,7 @@ void ModbusBridgeComponent::poll_uart_response_() {
     g_timeouts++;
     ESP_LOGW(TAG, "Modbus timeout: response incomplete. Dropping. client_id=%d", pending.client_fd);
     INC(g_drops_len);
-    fire_timeout_and_maybe_offline();
+    fire_rtu_timeout();
     finish_request();
     return;
   }
