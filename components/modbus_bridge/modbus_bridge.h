@@ -119,8 +119,8 @@ class ModbusBridgeComponent : public Component {
 
   // TCP server state and events
   bool tcp_server_running_{false};
-  esphome::Trigger<> tcp_started_cb_;
-  esphome::Trigger<> tcp_stopped_cb_;
+  esphome::CallbackManager<void()> tcp_started_cb_;
+  esphome::CallbackManager<void()> tcp_stopped_cb_;
   int tcp_client_count_{0};
   esphome::CallbackManager<void(int)> tcp_clients_changed_cb_;
 
