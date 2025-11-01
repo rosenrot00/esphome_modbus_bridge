@@ -4,7 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting a
 
 | Version   | Changes                                                                           |
 |-----------|-----------------------------------------------------------------------------------|
-| 2025.10.3 | Added automations for online, offline, timeout, command_sent                      |
+| 2025.10.3 | Added automations for tcp and rtu activities                                      |
 | 2025.10.2 | Introduced T1.5 waiting time for better modbus rtu frame detection on lower bauds |
 | 2025.10.1 | Implemented support for multiple bridges to be used with multiple UART interfaces |
 | 2025.09.1 | Added configurable `flow_control_pin` with inverted option                        |
@@ -55,10 +55,7 @@ esp32:
   board: esp32dev
   framework:
     type: esp-idf
-    #type: arduino            #should work as well
-
-#esp8266:
-#  board: nodemcuv2
+    #type: arduino            # should work as well
 
 external_components:
   - source:
@@ -72,70 +69,76 @@ uart:
   rx_pin: GPIO16
   baud_rate: 9600
   stop_bits: 1
-  rx_buffer_size: 256         # min. 256 recommended; increase for very long RTU responses
+  rx_buffer_size: 256  # minimum 256 recommended; increase for long RTU responses
 
-modbus_bridge:
-  id: mb_bridge
-  uart_id: uart_bus
-  tcp_port: 502               # TCP port
-  tcp_poll_interval: 50       # ms between TCP polls
-  tcp_client_timeout: 60000   # ms inactivity until TCP client is disconnected
-  tcp_allowed_clients: 4      # clamped to minimum 1, use with care as it increases memory usage
-  rtu_response_timeout: 3000  # ms, clamped internally to minimum of 10 ms)
-  # --- optional: toggles RS485 DE/RE if defined ---
-  #flow_control_pin: GPIO18    # (simple)
-  #flow_control_pin:           # (detailed, mode/output/open_drain also possible)
-    #number: GPIO18
-    #inverted: false
+  # Modbus bridge configuration
+  modbus_bridge:
+    id: mb_bridge
+    uart_id: uart_bus
+    tcp_port: 502                # TCP port to listen on
+    tcp_poll_interval: 50        # ms between TCP polls
+    tcp_client_timeout: 60000    # ms of inactivity before client is disconnected
+    tcp_allowed_clients: 4       # number of simultaneous TCP clients (min 1)
+    rtu_response_timeout: 3000   # ms, internally clamped to >=10 ms
+    #flow_control_pin: GPIO18     # optional: RS-485 DE/RE pin
 
-  #on_command_sent:        # fires for every RTU command sent
-  #  then:
-  #    - lambda: |-
-  #        ESP_LOGD("mb_bridge", "Cmd sent – FC=%d addr=%d", function_code, address);
-  #    - light.turn_on: led_blue
-  #    - delay: 100ms
-  #    - light.turn_off: led_blue
+    # Example – fires whenever the number of connected TCP clients changes
+    on_tcp_clients_changed:
+      then:
+        - lambda: |-
+            id(tcp_clients) = count;
+        - logger.log:
+            format: "TCP clients connected: %d"
+            args: ['count']
 
-  #on_timeout:             # fires for each timed-out request
-  #  then:
-  #    - lambda: |-
-  #        ESP_LOGW("mb_bridge", "Timeout – FC=%d addr=%d", function_code, address);
-  #    - light.turn_on: led_yellow
-  #    - delay: 400ms
-  #    - light.turn_off: led_yellow
+    # Other available events (use similarly):
+    # on_rtu_send:       # (function_code, address) – triggered for every RTU command sent
+    # on_rtu_receive:    # (function_code, address) – triggered for every valid RTU response
+    # on_rtu_timeout:    # (function_code, address) – triggered for RTU timeouts
+    # on_tcp_started:    # () – triggered when TCP server successfully starts
+    # on_tcp_stopped:    # () – triggered when TCP server stops or IP is lost
 
-  #on_offline:             # fires once when going from online → offline
-  #  then:
-  #    - lambda: |-
-  #        ESP_LOGE("mb_bridge", "Bridge OFFLINE – FC=%d addr=%d", function_code, address);
-  #    - light.turn_on: led_red
+# Output and LED for visual feedback
+output:
+  - platform: gpio
+    id: output_led_status
+    pin: GPIO2
 
-  #on_online:              # fires once when recovering from offline
-  #  then:
-  #    - lambda: |-
-  #        ESP_LOGI("mb_bridge", "Bridge ONLINE – FC=%d addr=%d", function_code, address);
-  #    - light.turn_off: led_red
-  #    - light.turn_on: led_green
-  #    - delay: 200ms
-  #    - light.turn_off: led_green
+light:
+  - platform: binary
+    id: led_status
+    name: "Status LED"
+    output: output_led_status
 
-#output:
-#  - platform: gpio
-#    id: output_led_green
-#    pin: GPIO25
-#  ...
+# Global variable to hold number of connected TCP clients
+globals:
+  - id: tcp_clients
+    type: int
+    restore_value: no
+    initial_value: '0'
 
-#light:
-#  - platform: binary
-#    id: led_green
-#    output: output_led_green
-#  ...
+# Every 3 s: blink LED as many times as connected TCP clients (100 ms per blink)
+interval:
+  - interval: 3s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(tcp_clients) > 0;'
+          then:
+            - repeat:
+                count: !lambda 'return id(tcp_clients);'
+                then:
+                  - light.turn_on: led_status
+                  - delay: 100ms
+                  - light.turn_off: led_status
+                  - delay: 200ms  # short pause between blinks
 
+# Debug switch for enabling verbose Modbus logging
 switch:
   - platform: template
     name: "Modbus Bridge Debug"
     id: modbus_debug_switch
-    restore_mode: RESTORE_DEFAULT_OFF  # debug disabled by default; persists across reboots
+    restore_mode: RESTORE_DEFAULT_OFF
     turn_on_action:
       - lambda: |-
           id(mb_bridge).set_debug(true);
