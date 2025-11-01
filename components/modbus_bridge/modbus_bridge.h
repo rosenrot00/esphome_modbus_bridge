@@ -9,7 +9,7 @@
 #include <initializer_list>
 #include <cstring>
 #include <deque>
-#include "esphome/core/automation.h"
+#include "esphome/core/automation.h"  // Brings in CallbackManager & Trigger types transitively
 
 #ifdef USE_ESP8266
 #include <ESP8266WiFi.h>
@@ -72,9 +72,12 @@ class ModbusBridgeComponent : public Component {
 
   // Bridge-global automation adders (events carry function_code and start_address)
   void add_on_command_sent_callback(std::function<void(int, int)> &&cb) { command_sent_cb_.add(std::move(cb)); }
-  void add_on_online_callback(std::function<void(int, int)> &&cb)       { online_cb_.add(std::move(cb)); }
-  void add_on_offline_callback(std::function<void(int, int)> &&cb)      { offline_cb_.add(std::move(cb)); }
-  void add_on_timeout_callback(std::function<void(int, int)> &&cb)      { timeout_cb_.add(std::move(cb)); }
+  void add_on_rtu_receive_callback(std::function<void(int, int)> &&cb)  { rtu_receive_cb_.add(std::move(cb)); }
+  void add_on_rtu_timeout_callback(std::function<void(int, int)> &&cb)  { rtu_timeout_cb_.add(std::move(cb)); }
+
+  void add_on_tcp_started_callback(std::function<void()> &&cb) { tcp_started_cb_.add(std::move(cb)); }
+  void add_on_tcp_stopped_callback(std::function<void()> &&cb) { tcp_stopped_cb_.add(std::move(cb)); }
+  void add_on_tcp_clients_changed_callback(std::function<void(int)> &&cb) { tcp_clients_changed_cb_.add(std::move(cb)); }
 
   void setup() override;
 
@@ -111,13 +114,17 @@ class ModbusBridgeComponent : public Component {
 
   // Bridge-global event callbacks
   esphome::CallbackManager<void(int, int)> command_sent_cb_;
-  esphome::CallbackManager<void(int, int)> online_cb_;
-  esphome::CallbackManager<void(int, int)> offline_cb_;
-  esphome::CallbackManager<void(int, int)> timeout_cb_;
+  esphome::CallbackManager<void(int, int)> rtu_receive_cb_;
+  esphome::CallbackManager<void(int, int)> rtu_timeout_cb_;
+
+  // TCP server state and events
+  bool tcp_server_running_{false};
+  esphome::Trigger<> tcp_started_cb_;
+  esphome::Trigger<> tcp_stopped_cb_;
+  int tcp_client_count_{0};
+  esphome::CallbackManager<void(int)> tcp_clients_changed_cb_;
 
   // Bridge-wide online/offline state and counters
-  bool module_offline_{false};
-  uint16_t consecutive_timeouts_{0};
 
   void start_uart_polling_();
   void append_crc(std::vector<uint8_t> &data);
