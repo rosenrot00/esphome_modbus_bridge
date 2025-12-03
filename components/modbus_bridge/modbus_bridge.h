@@ -66,6 +66,7 @@ class ModbusBridgeComponent : public Component {
     if (allowed < 1) allowed = 1;
     tcp_allowed_clients_ = allowed;
   }
+  void set_enabled(bool enabled);
 
   // NEW – optional RS-485 DE/RE control pin (only used if set)
   void set_flow_control_pin(GPIOPin *pin) { flow_control_pin_ = pin; }
@@ -102,6 +103,7 @@ class ModbusBridgeComponent : public Component {
   uint32_t rtu_response_timeout_ms_{3000};
   std::vector<uint8_t> temp_buffer_;
   uint8_t tcp_allowed_clients_{4};
+  bool enabled_{true};
 
   bool polling_active_{false};
 
