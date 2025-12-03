@@ -160,6 +160,11 @@ switch:
 #    turn_off_action:
 #      - lambda: |-
 #          id(mb_bridge).set_enabled(false);
+#on_boot:
+#  priority: 600
+#  then:
+#    - lambda: |-
+#        id(mb_bridge_enabled).publish_state(id(mb_bridge).is_enabled());
 ```
 #### Proven Compatibility
 
