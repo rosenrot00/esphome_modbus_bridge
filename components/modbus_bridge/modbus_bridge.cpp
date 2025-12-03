@@ -191,7 +191,9 @@ inline void ModbusBridgeComponent::rs485_end_tx_() {
 // -------------------------------------------------------------------------------------------
 
 
-ModbusBridgeComponent::ModbusBridgeComponent() {}
+ModbusBridgeComponent::ModbusBridgeComponent() {
+  this->enabled_ = true;
+}
 
 void ModbusBridgeComponent::setup() {
   this->sock_ = -1;
@@ -436,6 +438,20 @@ void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, 
 void ModbusBridgeComponent::check_tcp_sockets_() {
  #if defined(USE_ESP8266)
   // Per-instance RX accumulator
+  if (!this->enabled_) {
+    // Close all client sockets and clear accumulators
+    for (size_t i = 0; i < this->clients_.size(); ++i) {
+      auto &cl = this->clients_[i];
+      if (cl.socket.connected()) cl.socket.stop();
+      if (i < this->rx_accu8266_.size()) this->rx_accu8266_[i].clear();
+    }
+    // Notify tcp_client_count_ change if needed
+    if (this->tcp_client_count_ != 0) {
+      this->tcp_client_count_ = 0;
+      this->tcp_clients_changed_cb_.call(0);
+    }
+    return; // Do not accept or process any TCP traffic while disabled
+  }
   if (this->rx_accu8266_.size() < this->clients_.size())
     this->rx_accu8266_.resize(this->clients_.size());
   if (this->sock_ < 0) {
@@ -604,6 +620,22 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
   }
  #elif defined(USE_ESP32)
   // Per-instance RX accumulator
+  if (!this->enabled_) {
+    // Close all client sockets and clear accumulators
+    for (size_t i = 0; i < this->clients_.size(); ++i) {
+      auto &cl = this->clients_[i];
+      if (cl.fd >= 0) {
+        close(cl.fd);
+        cl.fd = -1;
+      }
+      if (i < this->rx_accu_.size()) this->rx_accu_[i].clear();
+    }
+    if (this->tcp_client_count_ != 0) {
+      this->tcp_client_count_ = 0;
+      this->tcp_clients_changed_cb_.call(0);
+    }
+    return; // Skip accept/read logic while disabled
+  }
   if (this->rx_accu_.size() != this->clients_.size()) this->rx_accu_.assign(this->clients_.size(), {});
   for (auto &v : this->rx_accu_) if (v.capacity() < kTcpAccuCap) v.reserve(kTcpAccuCap);
   if (this->sock_ < 0) {
@@ -957,6 +989,19 @@ void ModbusBridgeComponent::append_crc(std::vector<uint8_t> &data) {
 void ModbusBridgeComponent::set_debug(bool debug) {
   this->debug_ = debug;
   ESP_LOGI(TAG, "Debug mode %s", debug ? "enabled" : "disabled");
+}
+
+void ModbusBridgeComponent::set_enabled(bool enabled) {
+  if (this->enabled_ == enabled) return;
+  this->enabled_ = enabled;
+
+  if (!enabled) {
+    this->pending_requests_.clear();
+    this->polling_active_ = false;
+    if (this->uart_ != nullptr) {
+      drain_uart_rx(this->uart_);
+    }
+  }
 }
 
 
