@@ -4,7 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting a
 
 | Version   | Changes                                                                           |
 |-----------|-----------------------------------------------------------------------------------|
-| 2025.11.1 | 'enabled' was added to allow changing the bridges state during runtime            |
+| 2025.11.1 | `enabled` was added to allow changing the bridges state during runtime            |
 | 2025.10.3 | Added ESPHome automations for tcp and rtu activities                              |
 | 2025.10.2 | Introduced T1.5 waiting time for better modbus rtu frame detection on lower bauds |
 | 2025.10.1 | Implemented support for multiple bridges to be used with multiple UART interfaces |
