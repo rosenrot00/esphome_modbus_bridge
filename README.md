@@ -149,17 +149,17 @@ switch:
       - lambda: |-
           id(mb_bridge).set_debug(false);
           id(modbus_debug_switch).publish_state(false);
-  - platform: template
-    id: mb_bridge_enabled
-    name: "Modbus Bridge Enabled"
-    restore_state: true
-    optimistic: true
-    turn_on_action:
-      - lambda: |-
-          id(mb_bridge).set_enabled(true);
-    turn_off_action:
-      - lambda: |-
-          id(mb_bridge).set_enabled(false);
+#  - platform: template
+#    id: mb_bridge_enabled
+#    name: "Modbus Bridge Enabled"
+#    restore_state: true
+#    optimistic: true
+#    turn_on_action:
+#      - lambda: |-
+#          id(mb_bridge).set_enabled(true);
+#    turn_off_action:
+#      - lambda: |-
+#          id(mb_bridge).set_enabled(false);
 ```
 #### Proven Compatibility
 
