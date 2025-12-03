@@ -4,7 +4,8 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting a
 
 | Version   | Changes                                                                           |
 |-----------|-----------------------------------------------------------------------------------|
-| 2025.10.3 | Added ESPHome automations for tcp and rtu activities                                      |
+| 2025.11.1 | 'enabled' was added to allow changing the bridges state during runtime            |
+| 2025.10.3 | Added ESPHome automations for tcp and rtu activities                              |
 | 2025.10.2 | Introduced T1.5 waiting time for better modbus rtu frame detection on lower bauds |
 | 2025.10.1 | Implemented support for multiple bridges to be used with multiple UART interfaces |
 | 2025.09.1 | Added configurable `flow_control_pin` with inverted option                        |
@@ -81,6 +82,7 @@ uart:
     tcp_allowed_clients: 4       # number of simultaneous TCP clients (min 1)
     rtu_response_timeout: 3000   # ms, internally clamped to >=10 ms
     #flow_control_pin: GPIO18     # optional: RS-485 DE/RE pin
+    #enabled: true                # allows to enable or disable during runtime
 
     # Example – fires whenever the number of connected TCP clients changes
     on_tcp_clients_changed:
