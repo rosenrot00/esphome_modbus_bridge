@@ -67,6 +67,7 @@ class ModbusBridgeComponent : public Component {
     tcp_allowed_clients_ = allowed;
   }
   void set_enabled(bool enabled);
+  bool is_enabled() const { return this->enabled_; }
 
   // NEW – optional RS-485 DE/RE control pin (only used if set)
   void set_flow_control_pin(GPIOPin *pin) { flow_control_pin_ = pin; }
