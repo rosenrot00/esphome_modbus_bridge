@@ -1004,6 +1004,9 @@ void ModbusBridgeComponent::set_enabled(bool enabled) {
   }
 }
 
+bool ModbusBridgeComponent::is_enabled() const {
+  return this->enabled_;
+}
 
 }  // namespace modbus_bridge
 }  // namespace esphome
