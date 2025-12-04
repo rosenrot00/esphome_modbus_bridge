@@ -103,7 +103,7 @@ class ModbusBridgeComponent : public Component {
   uint32_t rtu_inactivity_timeout_ms_{20};
   uint32_t rtu_response_timeout_ms_{3000};
   std::vector<uint8_t> temp_buffer_;
-  uint8_t tcp_allowed_clients_{4};
+  uint8_t tcp_allowed_clients_{2};
   bool enabled_{true};
 
   bool polling_active_{false};
