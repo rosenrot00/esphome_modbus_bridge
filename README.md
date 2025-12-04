@@ -77,10 +77,10 @@ uart:
     id: mb_bridge
     uart_id: uart_bus
     tcp_port: 502                # TCP port to listen on
-    tcp_poll_interval: 50        # ms between TCP polls
-    tcp_client_timeout: 60000    # ms of inactivity before client is disconnected
-    tcp_allowed_clients: 2       # number of simultaneous TCP clients (min 1)
     rtu_response_timeout: 3000   # ms, internally clamped to >=10 ms
+    #tcp_client_timeout: 60000    # ms of inactivity before client is disconnected
+    #tcp_allowed_clients: 2       # number of simultaneous TCP clients (min 1)
+    #tcp_poll_interval: 50        # ms between TCP polls
     #flow_control_pin: GPIO18     # optional: RS-485 DE/RE pin
     #enabled: true                # allows to enable or disable during runtime
 
