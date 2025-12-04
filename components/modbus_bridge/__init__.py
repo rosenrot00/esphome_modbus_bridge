@@ -33,7 +33,7 @@ BASE_SCHEMA = cv.Schema({
     cv.Optional(CONF_TCP_POLL_INTERVAL, default=50): cv.positive_int,
     cv.Optional(CONF_TCP_CLIENT_TIMEOUT, default=60000): cv.positive_int,
     cv.Optional(CONF_RTU_RESPONSE_TIMEOUT, default=3000): cv.positive_int,
-    cv.Optional(CONF_TCP_ALLOWED_CLIENTS, default=4): cv.positive_int,
+    cv.Optional(CONF_TCP_ALLOWED_CLIENTS, default=2): cv.positive_int,
     cv.Optional(CONF_ENABLED, default=True): cv.boolean,
     # Expose bridge-global events to YAML automations
     cv.Optional(CONF_ON_COMMAND_SENT): automation.validate_automation({
