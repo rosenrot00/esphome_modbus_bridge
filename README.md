@@ -152,7 +152,7 @@ switch:
 #  - platform: template
 #    id: mb_bridge_enabled
 #    name: "Modbus Bridge Enabled"
-#    restore_state: true
+#    restore_mode: "ALWAYS_ON"
 #    optimistic: true
 #    turn_on_action:
 #      - lambda: |-
