@@ -72,33 +72,33 @@ uart:
   stop_bits: 1
   rx_buffer_size: 256  # minimum 256 recommended; increase for long RTU responses
 
-  # Modbus bridge configuration
-  modbus_bridge:
-    id: mb_bridge
-    uart_id: uart_bus
-    tcp_port: 502                # TCP port to listen on
-    rtu_response_timeout: 3000   # ms, internally clamped to >=10 ms
-    #tcp_client_timeout: 60000    # ms of inactivity before client is disconnected
-    #tcp_allowed_clients: 2       # number of simultaneous TCP clients (min 1)
-    #tcp_poll_interval: 50        # ms between TCP polls
-    #flow_control_pin: GPIO18     # optional: RS-485 DE/RE pin
-    #enabled: true                # allows to enable or disable during runtime
+# Modbus bridge configuration
+modbus_bridge:
+  id: mb_bridge
+  uart_id: uart_bus
+  tcp_port: 502                # TCP port to listen on
+  rtu_response_timeout: 3000   # ms, internally clamped to >=10 ms
+  #tcp_client_timeout: 60000    # ms of inactivity before client is disconnected
+  #tcp_allowed_clients: 2       # number of simultaneous TCP clients (min 1)
+  #tcp_poll_interval: 50        # ms between TCP polls
+  #flow_control_pin: GPIO18     # optional: RS-485 DE/RE pin
+  #enabled: true                # allows to enable or disable during runtime
 
-    # Example – fires whenever the number of connected TCP clients changes
-    on_tcp_clients_changed:
-      then:
-        - lambda: |-
-            id(tcp_clients) = count;
-        - logger.log:
-            format: "TCP clients connected: %d"
-            args: ['count']
+  # Example – fires whenever the number of connected TCP clients changes
+  on_tcp_clients_changed:
+    then:
+      - lambda: |-
+          id(tcp_clients) = count;
+      - logger.log:
+          format: "TCP clients connected: %d"
+          args: ['count']
 
-    # Other available events (use similarly):
-    # on_rtu_send:       # (function_code, address) – triggered for every RTU command sent
-    # on_rtu_receive:    # (function_code, address) – triggered for every valid RTU response
-    # on_rtu_timeout:    # (function_code, address) – triggered for RTU timeouts
-    # on_tcp_started:    # () – triggered when TCP server successfully starts
-    # on_tcp_stopped:    # () – triggered when TCP server stops or IP is lost
+  # Other available events (use similarly):
+  # on_rtu_send:       # (function_code, address) – triggered for every RTU command sent
+  # on_rtu_receive:    # (function_code, address) – triggered for every valid RTU response
+  # on_rtu_timeout:    # (function_code, address) – triggered for RTU timeouts
+  # on_tcp_started:    # () – triggered when TCP server successfully starts
+  # on_tcp_stopped:    # () – triggered when TCP server stops or IP is lost
 
 # Output and LED for visual feedback
 output:
