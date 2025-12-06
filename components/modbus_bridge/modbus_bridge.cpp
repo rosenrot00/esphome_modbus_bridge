@@ -219,6 +219,10 @@ void ModbusBridgeComponent::setup() {
   }
 
     this->set_interval("tcp_server_and_network_check", 1000, [this]() {
+      if (!this->enabled_) {
+        // Do not start or manage the TCP server while disabled.
+        return;
+      }
       if (this->sock_ < 0 && network::is_connected()) {
         ESP_LOGI(TAG, "IP available – initializing TCP server");
         this->initialize_tcp_server_();
@@ -240,18 +244,6 @@ void ModbusBridgeComponent::setup() {
           this->tcp_client_count_ = 0;
           this->tcp_clients_changed_cb_.call(0);
         }
-        // Also close all active clients and clear per-client state
-#if defined(USE_ESP8266)
-        for (auto &cl : this->clients_) {
-          if (cl.socket.connected()) cl.socket.stop();
-        }
-        // Accumulators are static in check_tcp_sockets_() and will be cleared there when sock_ < 0
-#elif defined(USE_ESP32)
-        for (auto &cl : this->clients_) {
-          if (cl.fd >= 0) { close(cl.fd); cl.fd = -1; }
-        }
-        // Accumulators are static in check_tcp_sockets_() and will be cleared there when sock_ < 0
-#endif
       }
     });
 
@@ -444,17 +436,6 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
  #if defined(USE_ESP8266)
   // Per-instance RX accumulator
   if (!this->enabled_) {
-    // Close all client sockets and clear accumulators
-    for (size_t i = 0; i < this->clients_.size(); ++i) {
-      auto &cl = this->clients_[i];
-      if (cl.socket.connected()) cl.socket.stop();
-      if (i < this->rx_accu8266_.size()) this->rx_accu8266_[i].clear();
-    }
-    // Notify tcp_client_count_ change if needed
-    if (this->tcp_client_count_ != 0) {
-      this->tcp_client_count_ = 0;
-      this->tcp_clients_changed_cb_.call(0);
-    }
     return; // Do not accept or process any TCP traffic while disabled
   }
   if (this->rx_accu8266_.size() < this->clients_.size())
@@ -624,19 +605,6 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
  #elif defined(USE_ESP32)
   // Per-instance RX accumulator
   if (!this->enabled_) {
-    // Close all client sockets and clear accumulators
-    for (size_t i = 0; i < this->clients_.size(); ++i) {
-      auto &cl = this->clients_[i];
-      if (cl.fd >= 0) {
-        close(cl.fd);
-        cl.fd = -1;
-      }
-      if (i < this->rx_accu_.size()) this->rx_accu_[i].clear();
-    }
-    if (this->tcp_client_count_ != 0) {
-      this->tcp_client_count_ = 0;
-      this->tcp_clients_changed_cb_.call(0);
-    }
     return; // Skip accept/read logic while disabled
   }
   if (this->rx_accu_.size() < this->clients_.size()) {
@@ -1007,11 +975,54 @@ void ModbusBridgeComponent::set_enabled(bool enabled) {
   this->enabled_ = enabled;
 
   if (!enabled) {
+    // Stop TCP server if running
+#if defined(USE_ESP8266)
+    if (this->sock_ >= 0) {
+      this->server_.stop();
+    }
+#elif defined(USE_ESP32)
+    if (this->sock_ >= 0) {
+      close(this->sock_);
+    }
+#endif
+    this->sock_ = -1;
+
+    // Stop all clients and clear per-client accumulators
+#if defined(USE_ESP8266)
+    for (size_t i = 0; i < this->clients_.size(); ++i) {
+      auto &cl = this->clients_[i];
+      if (cl.socket.connected()) cl.socket.stop();
+      if (i < this->rx_accu8266_.size()) this->rx_accu8266_[i].clear();
+    }
+#elif defined(USE_ESP32)
+    for (size_t i = 0; i < this->clients_.size(); ++i) {
+      auto &cl = this->clients_[i];
+      if (cl.fd >= 0) {
+        close(cl.fd);
+        cl.fd = -1;
+      }
+      if (i < this->rx_accu_.size()) this->rx_accu_[i].clear();
+    }
+#endif
+
+    // Reset TCP server state flags and notify listeners
+    if (this->tcp_server_running_) {
+      this->tcp_server_running_ = false;
+      this->tcp_stopped_cb_.call();
+    }
+    if (this->tcp_client_count_ != 0) {
+      this->tcp_client_count_ = 0;
+      this->tcp_clients_changed_cb_.call(0);
+    }
+
+    // Clear pending Modbus requests and stop UART polling
     this->pending_requests_.clear();
     this->polling_active_ = false;
     if (this->uart_ != nullptr) {
       drain_uart_rx(this->uart_);
     }
+  } else {
+    // Re-enabling: TCP server will be started again by tcp_server_and_network_check
   }
 }
 
