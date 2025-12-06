@@ -420,20 +420,21 @@ void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, 
   this->pending_requests_.push_back(std::move(req));
 
   if (this->pending_requests_.size() == 1) {
+    PendingRequest &cur = this->pending_requests_.front();
     if (this->debug_) {
-      ESP_LOGD(TAG, "RTU send: %s client_id=%d", to_hex(req.rtu_data).c_str(), client_fd);
+      ESP_LOGD(TAG, "RTU send: %s client_id=%d", to_hex(cur.rtu_data).c_str(), cur.client_fd);
     }
     this->uart_->flush();
     drain_uart_rx(this->uart_);
     this->rs485_begin_tx_();
-    this->uart_->write_array(req.rtu_data);
+    this->uart_->write_array(cur.rtu_data);
     this->uart_->flush();
     this->rs485_end_tx_();
     this->start_uart_polling_();
     // Fire command-sent trigger (bridge-global)
     {
-      uint8_t fc = pdu_fc_from_rtu_(req.rtu_data);
-      uint16_t addr = start_addr_from_rtu_(req.rtu_data);
+      uint8_t fc = pdu_fc_from_rtu_(cur.rtu_data);
+      uint16_t addr = start_addr_from_rtu_(cur.rtu_data);
       this->command_sent_cb_.call((int)fc, (int)addr); // Bridge-global event: command sent
     }
   }
