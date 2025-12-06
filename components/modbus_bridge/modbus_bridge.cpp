@@ -607,8 +607,6 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
       int r = it->socket.read(this->temp_buffer_.data(), to_read);
       if (r > 0) {
         int client_fd = static_cast<int>(std::distance(this->clients_.begin(), it));
-        if (this->rx_accu8266_.size() < this->clients_.size()) this->rx_accu8266_.resize(this->clients_.size());
-        if (this->rx_accu8266_[client_fd].capacity() < kTcpAccuCap8266) this->rx_accu8266_[client_fd].reserve(kTcpAccuCap8266);
         // Append incoming data
         this->rx_accu8266_[client_fd].insert(this->rx_accu8266_[client_fd].end(), this->temp_buffer_.begin(), this->temp_buffer_.begin() + r);
         process_accu(this->rx_accu8266_[client_fd], client_fd,
@@ -641,8 +639,14 @@ void ModbusBridgeComponent::check_tcp_sockets_() {
     }
     return; // Skip accept/read logic while disabled
   }
-  if (this->rx_accu_.size() != this->clients_.size()) this->rx_accu_.assign(this->clients_.size(), {});
-  for (auto &v : this->rx_accu_) if (v.capacity() < kTcpAccuCap) v.reserve(kTcpAccuCap);
+  if (this->rx_accu_.size() < this->clients_.size()) {
+    this->rx_accu_.resize(this->clients_.size());
+  } else if (this->rx_accu_.size() > this->clients_.size()) {
+    this->rx_accu_.resize(this->clients_.size());
+  }
+  for (auto &v : this->rx_accu_) {
+    if (v.capacity() < kTcpAccuCap) v.reserve(kTcpAccuCap);
+  }
   if (this->sock_ < 0) {
     for (auto &v : this->rx_accu_) v.clear();
     return; // keep accepting/reading even when requests are pending
