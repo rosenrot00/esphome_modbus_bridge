@@ -384,11 +384,15 @@ void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, 
   if (len < 6 + modbus_len) return;
 
   uint8_t uid = data[6];
-  std::vector<uint8_t> rtu;
-  rtu.reserve(static_cast<size_t>(modbus_len) + 1 + 2); // UID + PDU + CRC
-  rtu.push_back(uid);
-  rtu.insert(rtu.end(), data + 7, data + 6 + modbus_len);
-  append_crc(rtu);
+
+  PendingRequest req;
+  req.client_fd = client_fd;
+  // Build RTU frame directly in rtu_data: UID + PDU + CRC
+  req.rtu_data.clear();
+  req.rtu_data.reserve(static_cast<size_t>(modbus_len) + 1 + 2);  // UID + PDU + CRC
+  req.rtu_data.push_back(uid);
+  req.rtu_data.insert(req.rtu_data.end(), data + 7, data + 6 + modbus_len);
+  this->append_crc(req.rtu_data);
 
   if (this->debug_) {
     uint32_t now = millis();
@@ -397,13 +401,13 @@ void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, 
       uint32_t last = this->clients_[client_fd].last_activity;
       seconds_ago = (now - last) / 1000.0f;
     }
+    // req.rtu_data[1] is the function code (UID at [0], FC at [1])
     ESP_LOGD(TAG, "TCP->RTU UID: %d, FC: 0x%02X, LEN: %d (client_id=%d, last activity %.3f s ago)",
-         uid, rtu[1], modbus_len, client_fd, seconds_ago);
+             uid,
+             req.rtu_data.size() > 1 ? req.rtu_data[1] : 0,
+             modbus_len, client_fd, seconds_ago);
   }
 
-  PendingRequest req;
-  req.client_fd = client_fd;
-  req.rtu_data = rtu;
   memcpy(req.header, data, 7);
   {
     size_t rx_cap = this->uart_->get_rx_buffer_size();
@@ -411,25 +415,25 @@ void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, 
   }
   req.start_time = millis();
   req.last_change = req.start_time;
-  req.last_size = 0; // ensure deterministic timeout logic
+  req.last_size = 0;  // ensure deterministic timeout logic
   g_frames_in++;
   this->pending_requests_.push_back(std::move(req));
 
   if (this->pending_requests_.size() == 1) {
     if (this->debug_) {
-      ESP_LOGD(TAG, "RTU send: %s client_id=%d", to_hex(rtu).c_str(), client_fd);
+      ESP_LOGD(TAG, "RTU send: %s client_id=%d", to_hex(req.rtu_data).c_str(), client_fd);
     }
     this->uart_->flush();
     drain_uart_rx(this->uart_);
     this->rs485_begin_tx_();
-    this->uart_->write_array(rtu);
+    this->uart_->write_array(req.rtu_data);
     this->uart_->flush();
     this->rs485_end_tx_();
     this->start_uart_polling_();
     // Fire command-sent trigger (bridge-global)
     {
-      uint8_t fc = pdu_fc_from_rtu_(rtu);
-      uint16_t addr = start_addr_from_rtu_(rtu);
+      uint8_t fc = pdu_fc_from_rtu_(req.rtu_data);
+      uint16_t addr = start_addr_from_rtu_(req.rtu_data);
       this->command_sent_cb_.call((int)fc, (int)addr); // Bridge-global event: command sent
     }
   }
@@ -932,10 +936,12 @@ void ModbusBridgeComponent::poll_uart_response_() {
   // (e.g., 3× T1.5) with a minimum floor.
   const uint32_t settle_ms = std::max<uint32_t>(t15_ms * 4, 5);
 
-  if (millis() - pending.last_change > settle_ms) {
+  uint32_t gap_ms = millis() - pending.last_change;
+  if (gap_ms > settle_ms) {
     if (this->debug_) {
       std::string debug_output = to_hex(pending.response);
-      ESP_LOGD(TAG, "RTU recv (gap %.u ms, %d bytes): %s", (unsigned)settle_ms, (int)current_size, debug_output.c_str());
+      ESP_LOGD(TAG, "RTU recv (gap %u ms, %d bytes): %s",
+               (unsigned) gap_ms, (int) current_size, debug_output.c_str());
     }
     if (current_size < 3) {
       ESP_LOGW(TAG, "Invalid RTU response (<3 bytes) – dropping");
