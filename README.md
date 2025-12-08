@@ -189,10 +189,10 @@ The following diagram shows how an ESP32 is connected to an RS485 transceiver (e
              |        ESP32       |         |      RS485 Transceiver    |
              |       ESP8266      |         |   (e.g. MAX3485/SP3485)   |
              +--------------------+         +---------------------------+
-             | GPIO TX (UART TX)  |-------->| DI        (Data In)      |
-             | GPIO RX (UART RX)  |<--------| RO        (Receiver Out) |
-             | GPIO DE (Driver En)|-------->| DE        (Driver Enable)|
-             | GPIO RE (Recv En)  |-------->| /RE       (Recv Enable)  |
+             | GPIO TX (UART TX)  |-------->| DI        (Data In)       |
+             | GPIO RX (UART RX)  |<--------| RO        (Receiver Out)  |
+             | GPIO DE (Driver En)|-------->| DE        (Driver Enable) |
+             | GPIO RE (Recv En)  |-------->| /RE       (Recv Enable)   |
              | GND                |---------| GND                       |
              +--------------------+         +------------+--------------+
                                                      |
