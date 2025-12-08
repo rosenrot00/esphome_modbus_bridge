@@ -52,11 +52,38 @@ The response will match the Modbus TCP format and contain the same transaction I
 #### ESPHome Configuration Example
 
 ```yaml
+esphome:
+  name: modbus_bridge
+  friendly_name: Modbus TCP-to-RTU bridge
+
 esp32:
   board: esp32dev
   framework:
     type: esp-idf
     #type: arduino            # should work as well
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+
+ota:
+  platform: esphome
+  password: !secret ota_password      # for !secret secrets.yaml is needed https://esphome.io/guides/security_best_practices/#using-secretsyaml
+
+wifi:
+  ssid: !secret wifi_ssid             # for !secret secrets.yaml is needed https://esphome.io/guides/security_best_practices/#using-secretsyaml
+  password: !secret wifi_password     # for !secret secrets.yaml is needed https://esphome.io/guides/security_best_practices/#using-secretsyaml
+  # min_auth_mode: WPA3               # optional: Default is WPA2 on ESP32
+  # domain: .lan                      # optional: Default is local
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Modbus TCP-to-RTU bridge Fallback Hotspot"
+    password: !secret ap_password     # for !secret secrets.yaml is needed https://esphome.io/guides/security_best_practices/#using-secretsyaml
+
+captive_portal:
 
 external_components:
   - source:
@@ -70,18 +97,20 @@ uart:
   rx_pin: GPIO16
   baud_rate: 9600
   stop_bits: 1
+  # parity: NONE       # optional: Default is NONE
   rx_buffer_size: 256  # minimum 256 recommended; increase for long RTU responses
 
 # Modbus bridge configuration
 modbus_bridge:
   id: mb_bridge
   uart_id: uart_bus
-  tcp_port: 502                # TCP port to listen on
-  rtu_response_timeout: 3000   # ms, internally clamped to >=10 ms
+  tcp_port: 502                 # TCP port to listen on
+  rtu_response_timeout: 3000    # ms, internally clamped to >=10 ms
   #tcp_client_timeout: 60000    # ms of inactivity before client is disconnected
   #tcp_allowed_clients: 2       # number of simultaneous TCP clients (min 1)
   #tcp_poll_interval: 50        # ms between TCP polls
   #flow_control_pin: GPIO18     # optional: RS-485 DE/RE pin
+  #crc_bytes_swapped: false     # allows to swap CRC byte order LO/HI -> HI/LO
   #enabled: true                # allows to enable or disable during runtime
 
   # Example – fires whenever the number of connected TCP clients changes

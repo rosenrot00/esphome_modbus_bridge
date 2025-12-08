@@ -1,10 +1,8 @@
-import esphome.config_validation as cv
 import esphome.codegen as cg
+import esphome.config_validation as cv
+from esphome import automation, pins
 from esphome.components import uart
-from esphome.const import CONF_ID
-from esphome import pins
-from esphome import automation
-from esphome.const import CONF_TRIGGER_ID
+from esphome.const import CONF_ID, CONF_TRIGGER_ID
 
 CONF_TCP_PORT = "tcp_port"
 CONF_TCP_POLL_INTERVAL = "tcp_poll_interval"
@@ -12,6 +10,7 @@ CONF_TCP_CLIENT_TIMEOUT = "tcp_client_timeout"
 CONF_RTU_RESPONSE_TIMEOUT = "rtu_response_timeout"
 CONF_TCP_ALLOWED_CLIENTS = "tcp_allowed_clients"
 CONF_FLOW_CONTROL_PIN = "flow_control_pin"
+CONF_CRC_BYTES_SWAPPED = "crc_bytes_swapped"
 CONF_ENABLED = "enabled"
 
 CONF_ON_COMMAND_SENT = "on_command_sent"
@@ -22,45 +21,77 @@ CONF_ON_TCP_STARTED = "on_tcp_started"
 CONF_ON_TCP_STOPPED = "on_tcp_stopped"
 CONF_ON_TCP_CLIENTS_CHANGED = "on_tcp_clients_changed"
 
-modbus_bridge_ns = cg.esphome_ns.namespace('modbus_bridge')
-ModbusBridgeComponent = modbus_bridge_ns.class_('ModbusBridgeComponent', cg.Component)
+modbus_bridge_ns = cg.esphome_ns.namespace("modbus_bridge")
+ModbusBridgeComponent = modbus_bridge_ns.class_("ModbusBridgeComponent", cg.Component)
 
-BASE_SCHEMA = cv.Schema({
-    cv.GenerateID(): cv.declare_id(ModbusBridgeComponent),
-    cv.Required("uart_id"): cv.use_id(uart.UARTComponent),
-    cv.Optional(CONF_FLOW_CONTROL_PIN): pins.gpio_output_pin_schema,
-    cv.Optional(CONF_TCP_PORT, default=502): cv.port,
-    cv.Optional(CONF_TCP_POLL_INTERVAL, default=50): cv.positive_int,
-    cv.Optional(CONF_TCP_CLIENT_TIMEOUT, default=60000): cv.positive_int,
-    cv.Optional(CONF_RTU_RESPONSE_TIMEOUT, default=3000): cv.positive_int,
-    cv.Optional(CONF_TCP_ALLOWED_CLIENTS, default=2): cv.positive_int,
-    cv.Optional(CONF_ENABLED, default=True): cv.boolean,
-    # Expose bridge-global events to YAML automations
-    cv.Optional(CONF_ON_COMMAND_SENT): automation.validate_automation({
-        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template(cg.int_, cg.int_))
-    }),
-    cv.Optional(CONF_ON_RTU_SEND): automation.validate_automation({
-        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template(cg.int_, cg.int_))
-    }),
-    cv.Optional(CONF_ON_RTU_RECEIVE): automation.validate_automation({
-        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template(cg.int_, cg.int_))
-    }),
-    cv.Optional(CONF_ON_RTU_TIMEOUT): automation.validate_automation({
-        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template(cg.int_, cg.int_))
-    }),
-    cv.Optional(CONF_ON_TCP_STARTED): automation.validate_automation({
-        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template())
-    }),
-    cv.Optional(CONF_ON_TCP_STOPPED): automation.validate_automation({
-        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template())
-    }),
-    cv.Optional(CONF_ON_TCP_CLIENTS_CHANGED): automation.validate_automation({
-        cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(automation.Trigger.template(cg.int_))
-    }),
-}).extend(cv.COMPONENT_SCHEMA)
+BASE_SCHEMA = cv.Schema(
+    {
+        cv.GenerateID(): cv.declare_id(ModbusBridgeComponent),
+        cv.Required("uart_id"): cv.use_id(uart.UARTComponent),
+        cv.Optional(CONF_FLOW_CONTROL_PIN): pins.gpio_output_pin_schema,
+        cv.Optional(CONF_TCP_PORT, default=502): cv.port,
+        cv.Optional(CONF_TCP_POLL_INTERVAL, default=50): cv.positive_int,
+        cv.Optional(CONF_TCP_CLIENT_TIMEOUT, default=60000): cv.positive_int,
+        cv.Optional(CONF_RTU_RESPONSE_TIMEOUT, default=3000): cv.positive_int,
+        cv.Optional(CONF_TCP_ALLOWED_CLIENTS, default=2): cv.positive_int,
+        cv.Optional(CONF_CRC_BYTES_SWAPPED, default=False): cv.boolean,
+        cv.Optional(CONF_ENABLED, default=True): cv.boolean,
+        # Expose bridge-global events to YAML automations
+        cv.Optional(CONF_ON_COMMAND_SENT): automation.validate_automation(
+            {
+                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                    automation.Trigger.template(cg.int_, cg.int_)
+                )
+            }
+        ),
+        cv.Optional(CONF_ON_RTU_SEND): automation.validate_automation(
+            {
+                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                    automation.Trigger.template(cg.int_, cg.int_)
+                )
+            }
+        ),
+        cv.Optional(CONF_ON_RTU_RECEIVE): automation.validate_automation(
+            {
+                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                    automation.Trigger.template(cg.int_, cg.int_)
+                )
+            }
+        ),
+        cv.Optional(CONF_ON_RTU_TIMEOUT): automation.validate_automation(
+            {
+                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                    automation.Trigger.template(cg.int_, cg.int_)
+                )
+            }
+        ),
+        cv.Optional(CONF_ON_TCP_STARTED): automation.validate_automation(
+            {
+                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                    automation.Trigger.template()
+                )
+            }
+        ),
+        cv.Optional(CONF_ON_TCP_STOPPED): automation.validate_automation(
+            {
+                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                    automation.Trigger.template()
+                )
+            }
+        ),
+        cv.Optional(CONF_ON_TCP_CLIENTS_CHANGED): automation.validate_automation(
+            {
+                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
+                    automation.Trigger.template(cg.int_)
+                )
+            }
+        ),
+    }
+).extend(cv.COMPONENT_SCHEMA)
 
 # Allow a list of bridge definitions under modbus_bridge:
 CONFIG_SCHEMA = cv.ensure_list(BASE_SCHEMA)
+
 
 async def to_code(config):
     for conf in config:
@@ -74,6 +105,7 @@ async def to_code(config):
         cg.add(var.set_tcp_client_timeout(conf[CONF_TCP_CLIENT_TIMEOUT]))
         cg.add(var.set_rtu_response_timeout(conf[CONF_RTU_RESPONSE_TIMEOUT]))
         cg.add(var.set_tcp_allowed_clients(conf[CONF_TCP_ALLOWED_CLIENTS]))
+        cg.add(var.set_crc_bytes_swapped(conf[CONF_CRC_BYTES_SWAPPED]))
         cg.add(var.set_enabled(conf[CONF_ENABLED]))
 
         # Bind YAML automations → C++ callbacks (function_code, address)
@@ -82,13 +114,17 @@ async def to_code(config):
                 for ac in conf[list_key]:
                     trig = cg.new_Pvariable(ac[CONF_TRIGGER_ID])
                     # C++ lambda triggers the automation with (function_code, address)
-                    cb = cg.RawExpression(f"[](int fc, int addr) {{ {trig}->trigger(fc, addr); }}")
+                    cb = cg.RawExpression(
+                        f"[](int fc, int addr) {{ {trig}->trigger(fc, addr); }}"
+                    )
                     cg.add(getattr(var, adder)(cb))
-                    await automation.build_automation(trig, [(cg.int_, "function_code"), (cg.int_, "address")], ac)
+                    await automation.build_automation(
+                        trig, [(cg.int_, "function_code"), (cg.int_, "address")], ac
+                    )
 
         await _bind(CONF_ON_COMMAND_SENT, "add_on_command_sent_callback")
         # RTU-centric events
-        await _bind(CONF_ON_RTU_SEND,    "add_on_command_sent_callback")   # alias: RTU send
+        await _bind(CONF_ON_RTU_SEND, "add_on_command_sent_callback")  # alias: RTU send
         await _bind(CONF_ON_RTU_RECEIVE, "add_on_rtu_receive_callback")
         await _bind(CONF_ON_RTU_TIMEOUT, "add_on_rtu_timeout_callback")
 
