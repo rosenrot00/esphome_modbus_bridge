@@ -10,6 +10,7 @@ CONF_TCP_CLIENT_TIMEOUT = "tcp_client_timeout"
 CONF_RTU_RESPONSE_TIMEOUT = "rtu_response_timeout"
 CONF_TCP_ALLOWED_CLIENTS = "tcp_allowed_clients"
 CONF_FLOW_CONTROL_PIN = "flow_control_pin"
+CONF_CRC_BYTES_SWAPPED = "crc_bytes_swapped"
 CONF_ENABLED = "enabled"
 
 CONF_ON_COMMAND_SENT = "on_command_sent"
@@ -33,6 +34,7 @@ BASE_SCHEMA = cv.Schema(
         cv.Optional(CONF_TCP_CLIENT_TIMEOUT, default=60000): cv.positive_int,
         cv.Optional(CONF_RTU_RESPONSE_TIMEOUT, default=3000): cv.positive_int,
         cv.Optional(CONF_TCP_ALLOWED_CLIENTS, default=2): cv.positive_int,
+        cv.Optional(CONF_CRC_BYTES_SWAPPED, default=False): cv.boolean,
         cv.Optional(CONF_ENABLED, default=True): cv.boolean,
         # Expose bridge-global events to YAML automations
         cv.Optional(CONF_ON_COMMAND_SENT): automation.validate_automation(
@@ -103,6 +105,7 @@ async def to_code(config):
         cg.add(var.set_tcp_client_timeout(conf[CONF_TCP_CLIENT_TIMEOUT]))
         cg.add(var.set_rtu_response_timeout(conf[CONF_RTU_RESPONSE_TIMEOUT]))
         cg.add(var.set_tcp_allowed_clients(conf[CONF_TCP_ALLOWED_CLIENTS]))
+        cg.add(var.set_crc_bytes_swapped(conf[CONF_CRC_BYTES_SWAPPED]))
         cg.add(var.set_enabled(conf[CONF_ENABLED]))
 
         # Bind YAML automations → C++ callbacks (function_code, address)

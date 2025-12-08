@@ -1181,6 +1181,12 @@ namespace esphome
       if (data.empty())
         return;
       uint16_t crc = modbus_crc(data.data(), data.size());
+      if (this->crc_bytes_swapped_)
+      {
+        data.push_back((crc >> 8) & 0xFF);
+        data.push_back(crc & 0xFF);
+        return;
+      }
       data.push_back(crc & 0xFF);
       data.push_back((crc >> 8) & 0xFF);
     }
