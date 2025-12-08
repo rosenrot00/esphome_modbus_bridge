@@ -181,6 +181,29 @@ This bridge has been tested successfully with the [homeassistant-solax-modbus](h
 [07:32:40][D][modbus_bridge:167]: RTU->TCP response: 09 BF 00 00 00 AD 01 04 AA 09 65 00 0B 01 5E 0F 32 15 DC 00 2D 00 44 13 87 00 31 00 02 06 DF 0E EA 00 1E 10 EE 17 E6 00 02 09 5B 13 87 00 07 00 00 0A A8 00 B6 13 80 00 01 00 18 00 01 00 00 00 00 00 3E 01 37 00 00 00 00 00 25 01 63 00 00 00 1F 01 9A 01 C2 32 00 00 00 00 01 00 00 01 9A 00 0A 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 05
 [07:32:40][D][modbus_bridge:168]: Response time: 117ms
 ```
+
+#### Hardware Setup
+The following diagram shows how an ESP32 is connected to an RS485 transceiver (e.g., MAX3485, SP3485, SN65HVD…) before the RS485 differential lines are attached to a Modbus bus.
+```
+             +--------------------+         +---------------------------+
+             |        ESP32       |         |      RS485 Transceiver    |
+             |       ESP8266      |         |   (e.g. MAX3485/SP3485)   |
+             +--------------------+         +---------------------------+
+             | GPIO TX (UART TX)  |-------->| DI        (Data In)      |
+             | GPIO RX (UART RX)  |<--------| RO        (Receiver Out) |
+             | GPIO DE (Driver En)|-------->| DE        (Driver Enable)|
+             | GPIO RE (Recv En)  |-------->| /RE       (Recv Enable)  |
+             | GND                |---------| GND                       |
+             +--------------------+         +------------+--------------+
+                                                     |
+                                                     |
+                                                     |   RS485 differential pair
+                                                     |   (before connecting to Modbus)
+                                                     |
+                                              +------+------+ 
+                                              |   A   |   B |
+                                              +------+------+
+```
 ## modbus_rw.py – Modbus TCP Register Read/Write Tool
 
 `modbus_rw.py` is a simple command-line utility for reading and writing Modbus TCP registers using the `pymodbus` library.  
