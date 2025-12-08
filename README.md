@@ -82,6 +82,7 @@ modbus_bridge:
   #tcp_allowed_clients: 2       # number of simultaneous TCP clients (min 1)
   #tcp_poll_interval: 50        # ms between TCP polls
   #flow_control_pin: GPIO18     # optional: RS-485 DE/RE pin
+  #crc_bytes_swapped: false     # allows to swap CRC byte order LO/HI -> HI/LO
   #enabled: true                # allows to enable or disable during runtime
 
   # Example – fires whenever the number of connected TCP clients changes
