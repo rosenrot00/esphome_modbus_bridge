@@ -53,35 +53,43 @@ The response will match the Modbus TCP format and contain the same transaction I
 
 ```yaml
 esphome:
-  name: modbus_bridge
+  name: modbus-bridge
   friendly_name: Modbus TCP-to-RTU bridge
+
+  # Run on boot: publish whether the bridge is enabled
+  on_boot:
+    priority: 600
+    then:
+      - lambda: |-
+          id(mb_bridge_enabled).publish_state(id(mb_bridge).is_enabled());
 
 esp32:
   board: esp32dev
   framework:
-    type: esp-idf
-    #type: arduino            # should work as well
+    type: esp-idf                    # ESP-IDF recommended
+    #type: arduino                   # Arduino also works
 
-# Enable logging
+# Enable logging over UART
 logger:
 
 # Enable Home Assistant API
 api:
 
+# Enable OTA updates
 ota:
   platform: esphome
-  password: !secret ota_password      # for !secret secrets.yaml is needed https://esphome.io/guides/security_best_practices/#using-secretsyaml
+  password: !secret ota_password      # https://esphome.io/guides/security_best_practices/#using-secretsyaml
 
 wifi:
-  ssid: !secret wifi_ssid             # for !secret secrets.yaml is needed https://esphome.io/guides/security_best_practices/#using-secretsyaml
-  password: !secret wifi_password     # for !secret secrets.yaml is needed https://esphome.io/guides/security_best_practices/#using-secretsyaml
-  # min_auth_mode: WPA3               # optional: Default is WPA2 on ESP32
-  # domain: .lan                      # optional: Default is local
+  ssid: !secret wifi_ssid             # https://esphome.io/guides/security_best_practices/#using-secretsyaml
+  password: !secret wifi_password     # https://esphome.io/guides/security_best_practices/#using-secretsyaml
+  # min_auth_mode: WPA3               # Optional: Default is WPA2 on ESP32
+  # domain: .lan                      # Optional: Default is local 
 
-  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  # Fallback hotspot if WiFi fails
   ap:
-    ssid: "Modbus TCP-to-RTU bridge Fallback Hotspot"
-    password: !secret ap_password     # for !secret secrets.yaml is needed https://esphome.io/guides/security_best_practices/#using-secretsyaml
+    ssid: "Modbus TCP-to-RTU bridge Hotspot"
+    password: !secret ap_password     # https://esphome.io/guides/security_best_practices/#using-secretsyaml
 
 captive_portal:
 
@@ -91,29 +99,30 @@ external_components:
       url: https://github.com/rosenrot00/esphome_modbus_bridge
     components: [modbus_bridge]
 
+# UART hardware configuration: Modbus RTU (RS-485)
 uart:
   id: uart_bus
   tx_pin: GPIO17
   rx_pin: GPIO16
   baud_rate: 9600
-  stop_bits: 1
-  # parity: NONE       # optional: Default is NONE
-  rx_buffer_size: 256  # minimum 256 recommended; increase for long RTU responses
+  # stop_bits: 1                 # Optional: Default is 1
+  # parity: NONE                 # Optional: Default is NONE
+  rx_buffer_size: 256            # minimum 256 recommended; increase for long RTU responses
 
-# Modbus bridge configuration
+# Modbus bridge configuration: TCP server <-> UART RTU translator
 modbus_bridge:
   id: mb_bridge
   uart_id: uart_bus
-  tcp_port: 502                 # TCP port to listen on
-  rtu_response_timeout: 3000    # ms, internally clamped to >=10 ms
-  #tcp_client_timeout: 60000    # ms of inactivity before client is disconnected
-  #tcp_allowed_clients: 2       # number of simultaneous TCP clients (min 1)
-  #tcp_poll_interval: 50        # ms between TCP polls
-  #flow_control_pin: GPIO18     # optional: RS-485 DE/RE pin
-  #crc_bytes_swapped: false     # allows to swap CRC byte order LO/HI -> HI/LO
-  #enabled: true                # allows to enable or disable during runtime
+  tcp_port: 502                  # TCP port to listen on
+  rtu_response_timeout: 3000     # ms, internally clamped to >=10 ms
+  # tcp_client_timeout: 60000    # ms of inactivity before client is disconnected
+  # tcp_allowed_clients: 2       # number of simultaneous TCP clients (min 1)
+  # tcp_poll_interval: 50        # ms between TCP polls
+  # flow_control_pin: GPIO18     # Optional: RS-485 DE/RE pin
+  # crc_bytes_swapped: false     # allows to swap CRC byte order LO/HI -> HI/LO
+  # enabled: true                # allows to enable or disable during runtime
 
-  # Example – fires whenever the number of connected TCP clients changes
+  # Event: triggered whenever number of TCP clients changes
   on_tcp_clients_changed:
     then:
       - lambda: |-
@@ -129,26 +138,27 @@ modbus_bridge:
   # on_tcp_started:    # () – triggered when TCP server successfully starts
   # on_tcp_stopped:    # () – triggered when TCP server stops or IP is lost
 
-# Output and LED for visual feedback
+# Output pin for status LED
 output:
   - platform: gpio
     id: output_led_status
     pin: GPIO2
 
+# Binary LED light entity
 light:
   - platform: binary
     id: led_status
     name: "Status LED"
     output: output_led_status
 
-# Global variable to hold number of connected TCP clients
+# Global variable to store connected TCP client count
 globals:
   - id: tcp_clients
     type: int
     restore_value: no
     initial_value: '0'
 
-# Every 3 s: blink LED as many times as connected TCP clients (100 ms per blink)
+# Every 3 seconds, blink the LED N times (N = connected TCP clients)
 interval:
   - interval: 3s
     then:
@@ -164,8 +174,8 @@ interval:
                   - light.turn_off: led_status
                   - delay: 100ms  # short pause between blinks
 
-# Debug switch for enabling verbose Modbus logging
 switch:
+  # Switch: enable/disable verbose Modbus debugging
   - platform: template
     name: "Modbus Bridge Debug"
     id: modbus_debug_switch
@@ -178,22 +188,19 @@ switch:
       - lambda: |-
           id(mb_bridge).set_debug(false);
           id(modbus_debug_switch).publish_state(false);
-#  - platform: template
-#    id: mb_bridge_enabled
-#    name: "Modbus Bridge Enabled"
-#    restore_mode: "ALWAYS_ON"
-#    optimistic: true
-#    turn_on_action:
-#      - lambda: |-
-#          id(mb_bridge).set_enabled(true);
-#    turn_off_action:
-#      - lambda: |-
-#          id(mb_bridge).set_enabled(false);
-#on_boot:
-#  priority: 600
-#  then:
-#    - lambda: |-
-#        id(mb_bridge_enabled).publish_state(id(mb_bridge).is_enabled());
+
+  # Switch: enable/disable the Modbus bridge itself
+  - platform: template
+    id: mb_bridge_enabled
+    name: "Modbus Bridge Enabled"
+    restore_mode: "ALWAYS_ON"
+    optimistic: true
+    turn_on_action:
+      - lambda: |-
+          id(mb_bridge).set_enabled(true);
+    turn_off_action:
+      - lambda: |-
+          id(mb_bridge).set_enabled(false);
 ```
 #### Proven Compatibility
 
