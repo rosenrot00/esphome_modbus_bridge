@@ -299,17 +299,55 @@ namespace esphome
         // Do not start or manage the TCP server while disabled.
         return;
       }
-      if (this->sock_ < 0 && network::is_connected()) {
+
+      // Treat "IP available" as "at least one IP address assigned" (backend-agnostic).
+      auto ips = network::get_ip_addresses();
+      const bool have_ip = !ips.empty();
+
+      if (this->sock_ < 0 && have_ip) {
         ESP_LOGI(TAG, "IP available – initializing TCP server");
         this->initialize_tcp_server_();
-      } else if (this->sock_ >= 0 && !network::is_connected()) {
+      } else if (this->sock_ >= 0 && !have_ip) {
         ESP_LOGW(TAG, "Lost network IP – closing TCP server");
+
+        // Stop accepting new connections.
 #if defined(USE_ESP8266)
         this->server_.stop();
 #elif defined(USE_ESP32)
         close(this->sock_);
 #endif
         this->sock_ = -1;
+
+        // Close all existing clients and clear per-client accumulators.
+#if defined(USE_ESP8266)
+        for (size_t i = 0; i < this->clients_.size(); ++i) {
+          auto &cl = this->clients_[i];
+          if (cl.socket.connected())
+            cl.socket.stop();
+          if (i < this->rx_accu8266_.size())
+            this->rx_accu8266_[i].clear();
+          this->purge_client_(i, &this->rx_accu8266_);
+        }
+#elif defined(USE_ESP32)
+        for (size_t i = 0; i < this->clients_.size(); ++i) {
+          auto &cl = this->clients_[i];
+          if (cl.fd >= 0) {
+            this->purge_client_(i, &this->rx_accu_);
+            close(cl.fd);
+            cl.fd = -1;
+          }
+          if (i < this->rx_accu_.size())
+            this->rx_accu_[i].clear();
+        }
+#endif
+
+        // Clear any pending Modbus requests and stop UART polling.
+        this->pending_requests_.clear();
+        this->polling_active_ = false;
+        if (this->uart_ != nullptr) {
+          drain_uart_rx(this->uart_);
+        }
+
         // TCP event: stopped (guarded for idempotency)
         if (this->tcp_server_running_) {
           this->tcp_server_running_ = false;
@@ -320,7 +358,8 @@ namespace esphome
           this->tcp_client_count_ = 0;
           this->tcp_clients_changed_cb_.call(0);
         }
-      } });
+      }
+      });
 
       this->set_interval("tcp_poll", this->tcp_poll_interval_ms_, [this]()
                          { this->check_tcp_sockets_(); });
