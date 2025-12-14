@@ -4,6 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting a
 
 | Version   | Changes                                                                           |
 |-----------|-----------------------------------------------------------------------------------|
+| 2025.12.1 | For more compatibility a `crc_bytes_swapped` option was added                     |
 | 2025.11.1 | `enabled` was added to allow changing the bridges state during runtime            |
 | 2025.10.3 | Added ESPHome automations for tcp and rtu activities                              |
 | 2025.10.2 | Introduced T1.5 waiting time for better modbus rtu frame detection on lower bauds |
@@ -13,33 +14,9 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting a
 | 2025.08.1 | Added support for multiple concurrent TCP clients with preemption logic           |
 | 2025.07.1 | Initial public README and Python `modbus_rw.py` tool                              |
 
-#### Protocol Overview
+#### Features
 
 The bridge listens on a configurable TCP port (default: 502) and expects standard Modbus TCP frames from clients. Each request is translated into a Modbus RTU frame, transmitted over UART, and the response is converted back into Modbus TCP and returned to the client.
-
-#### Modbus TCP Request Format
-
-Each Modbus TCP request must follow this format:
-
-- **Transaction ID**: 2 bytes (arbitrary, echoed back)
-- **Protocol ID**: 2 bytes (must be 0)
-- **Length**: 2 bytes (number of following bytes, typically `unit id` + `PDU`)
-- **Unit ID**: 1 byte (RTU slave address)
-- **PDU**: n bytes (Function code and data)
-
-Example (read holding registers, unit ID 1, starting at 0x0000, count 1):
-```
-00 01   - Transaction ID
-00 00   - Protocol ID
-00 06   - Length
-01      - Unit ID (RTU address)
-03      - Function code (Read Holding Registers)
-00 00   - Start address high/low
-00 01   - Register count high/low
-```
-The response will match the Modbus TCP format and contain the same transaction ID.
-
-#### Features
 
 - Acts as a Modbus RTU master on UART
 - Multiple concurrent Modbus TCP clients (slot‑limited)
@@ -48,6 +25,35 @@ The response will match the Modbus TCP format and contain the same transaction I
 - Works with all Modbus function codes
 - Optional same‑IP preemption when slots are full
 - Compatible with Home Assistant and third‑party Modbus TCP tools
+
+#### Proven Compatibility
+
+- [ha-solarman](https://github.com/davidrapan/ha-solarman) thanks to @davidrapan
+- [Marstek Venus Battery](https://github.com/ViperRNMC/marstek_venus_modbus) thanks to @ebbenberg
+- [homeassistant-solax-modbus](https://github.com/wills106/homeassistant-solax-modbus)
+
+#### Hardware Setup
+The following diagram shows how an ESP32 is connected to an RS485 transceiver (e.g., MAX3485, SP3485, SN65HVD…) before the RS485 differential lines are attached to a Modbus bus.
+```
+             +--------------------+         +---------------------------+
+             |        ESP32       |         |      RS485 Transceiver    |
+             |       ESP8266      |         |   (e.g. MAX3485/SP3485)   |
+             +--------------------+         +---------------------------+
+             | GPIO TX (UART TX)  |-------->| DI        (Data In)       |
+             | GPIO RX (UART RX)  |<--------| RO        (Receiver Out)  |
+             | GPIO DE (Driver En)|-------->| DE        (Driver Enable) |
+             | GPIO RE (Recv En)  |-------->| /RE       (Recv Enable)   |
+             | GND                |---------| GND                       |
+             +--------------------+         +------------+--------------+
+                                                     |
+                                                     |
+                                                     |   RS485 differential pair
+                                                     |   (before connecting to Modbus)
+                                                     |
+                                              +------+------+ 
+                                              |   A   |   B |
+                                              +------+------+
+```
 
 #### ESPHome Configuration Example
 
@@ -202,44 +208,29 @@ switch:
       - lambda: |-
           id(mb_bridge).set_enabled(false);
 ```
-#### Proven Compatibility
 
-This bridge has been tested successfully with the [homeassistant-solax-modbus](https://github.com/wills106/homeassistant-solax-modbus) integration.
-```
-[07:32:40][D][modbus_bridge:104]: TCP->RTU UID: 1, FC: 0x03, LEN: 6
-[07:32:40][D][modbus_bridge:109]: RTU send: 01 03 01 02 00 5F A5 CE 
-[07:32:40][D][modbus_bridge:150]: RTU recv (195 bytes): 01 03 BE 00 00 00 00 00 03 00 03 00 00 00 00 00 01 00 01 00 02 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 0A C8 07 30 00 00 00 00 00 00 00 00 00 00 00 00 00 1E 00 00 00 00 00 00 07 D0 00 50 03 E8 00 28 00 1E 03 20 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 F4 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-[07:32:40][D][modbus_bridge:167]: RTU->TCP response: 09 BE 00 00 00 C1 01 03 BE 00 00 00 00 00 03 00 03 00 00 00 00 00 01 00 01 00 02 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 01 00 00 0A C8 07 30 00 00 00 00 00 00 00 00 00 00 00 00 00 1E 00 00 00 00 00 00 07 D0 00 50 03 E8 00 28 00 1E 03 20 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01 F4 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-[07:32:40][D][modbus_bridge:168]: Response time: 106ms
-[07:32:40][D][modbus_bridge:104]: TCP->RTU UID: 1, FC: 0x04, LEN: 6
-[07:32:40][D][modbus_bridge:109]: RTU send: 01 04 00 00 00 55 30 35 
-[07:32:40][D][modbus_bridge:150]: RTU recv (175 bytes): 01 04 AA 09 65 00 0B 01 5E 0F 32 15 DC 00 2D 00 44 13 87 00 31 00 02 06 DF 0E EA 00 1E 10 EE 17 E6 00 02 09 5B 13 87 00 07 00 00 0A A8 00 B6 13 80 00 01 00 18 00 01 00 00 00 00 00 3E 01 37 00 00 00 00 00 25 01 63 00 00 00 1F 01 9A 01 C2 32 00 00 00 00 01 00 00 01 9A 00 0A 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 05 50 00 00 00 5B
-[07:32:40][D][modbus_bridge:167]: RTU->TCP response: 09 BF 00 00 00 AD 01 04 AA 09 65 00 0B 01 5E 0F 32 15 DC 00 2D 00 44 13 87 00 31 00 02 06 DF 0E EA 00 1E 10 EE 17 E6 00 02 09 5B 13 87 00 07 00 00 0A A8 00 B6 13 80 00 01 00 18 00 01 00 00 00 00 00 3E 01 37 00 00 00 00 00 25 01 63 00 00 00 1F 01 9A 01 C2 32 00 00 00 00 01 00 00 01 9A 00 0A 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 05
-[07:32:40][D][modbus_bridge:168]: Response time: 117ms
-```
+#### Modbus TCP Request Format
 
-#### Hardware Setup
-The following diagram shows how an ESP32 is connected to an RS485 transceiver (e.g., MAX3485, SP3485, SN65HVD…) before the RS485 differential lines are attached to a Modbus bus.
+Each Modbus TCP request must follow this format:
+
+- **Transaction ID**: 2 bytes (arbitrary, echoed back)
+- **Protocol ID**: 2 bytes (must be 0)
+- **Length**: 2 bytes (number of following bytes, typically `unit id` + `PDU`)
+- **Unit ID**: 1 byte (RTU slave address)
+- **PDU**: n bytes (Function code and data)
+
+Example (read holding registers, unit ID 1, starting at 0x0000, count 1):
 ```
-             +--------------------+         +---------------------------+
-             |        ESP32       |         |      RS485 Transceiver    |
-             |       ESP8266      |         |   (e.g. MAX3485/SP3485)   |
-             +--------------------+         +---------------------------+
-             | GPIO TX (UART TX)  |-------->| DI        (Data In)       |
-             | GPIO RX (UART RX)  |<--------| RO        (Receiver Out)  |
-             | GPIO DE (Driver En)|-------->| DE        (Driver Enable) |
-             | GPIO RE (Recv En)  |-------->| /RE       (Recv Enable)   |
-             | GND                |---------| GND                       |
-             +--------------------+         +------------+--------------+
-                                                     |
-                                                     |
-                                                     |   RS485 differential pair
-                                                     |   (before connecting to Modbus)
-                                                     |
-                                              +------+------+ 
-                                              |   A   |   B |
-                                              +------+------+
+00 01   - Transaction ID
+00 00   - Protocol ID
+00 06   - Length
+01      - Unit ID (RTU address)
+03      - Function code (Read Holding Registers)
+00 00   - Start address high/low
+00 01   - Register count high/low
 ```
+The response will match the Modbus TCP format and contain the same transaction ID.
+
 ## modbus_rw.py – Modbus TCP Register Read/Write Tool
 
 `modbus_rw.py` is a simple command-line utility for reading and writing Modbus TCP registers using the `pymodbus` library.  
