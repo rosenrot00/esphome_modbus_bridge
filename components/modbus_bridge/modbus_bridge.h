@@ -4,9 +4,7 @@
 #include "esphome/components/uart/uart.h"
 #include "esphome/core/hal.h" // GPIOPin
 #include <vector>
-#include <memory>
 #include <functional>
-#include <initializer_list>
 #include <cstring>
 #include <deque>
 #include "esphome/core/automation.h" // Brings in CallbackManager & Trigger types transitively
@@ -41,7 +39,7 @@ namespace esphome
     struct PendingRequest
     {
       // TCP-side identification
-      int client_fd; // Used as an identifier for the client on both ESP32 and ESP8266
+      int client_fd; // client slot index (not a real fd); used to map response back to the TCP client
 
       // Payload data
       uint8_t header[7];
