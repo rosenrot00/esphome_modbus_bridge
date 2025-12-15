@@ -550,6 +550,7 @@ namespace esphome
       req.start_time = millis();
       req.last_change = req.start_time;
       req.last_size = 0; // ensure deterministic timeout logic
+      req.stable_polls = 0;
       g_frames_in++;
       this->pending_requests_.push_back(std::move(req));
 
@@ -1142,10 +1143,7 @@ namespace esphome
           else
             break;
         }
-        if (pending.response.size() > before)
-        {
-          pending.last_change = millis();
-        }
+        // last_change no longer used for end-of-frame detection (size-stability is used instead)
       }
 
       size_t current_size = pending.response.size();
@@ -1169,23 +1167,25 @@ namespace esphome
         return; // grace elapsed but still within overall timeout
       }
 
-      // --- End-of-frame detection by debounced Inter-Byte Gap (T1.5) ---
-      // Compute inter-byte timeout (T1.5). Use floor to avoid scheduler jitter at low baud.
-      const uint32_t t15_ms = std::max<uint32_t>((uint32_t)((this->char_time_us_ * 3) / 2 / 1000), 10);
-      // Some UART drivers flush RX on very short idle gaps (~2 char times). To avoid
-      // prematurely finalizing large RTU frames that arrive in bursts, require a
-      // longer stable gap before we close the frame. Choose a conservative factor
-      // (e.g., 3× T1.5) with a minimum floor.
-      const uint32_t settle_ms = std::max<uint32_t>(t15_ms * 4, 5);
+      // --- End-of-frame detection by size stability over consecutive polls ---
+      // Consider the RTU response complete once we have observed no growth in
+      // `pending.response.size()` for two consecutive polling intervals.
+      if (current_size == pending.last_size) {
+        if (pending.stable_polls < 255)
+          pending.stable_polls++;
+      } else {
+        pending.last_size = current_size;
+        pending.stable_polls = 0;
+      }
 
-      uint32_t gap_ms = millis() - pending.last_change;
-      if (gap_ms > settle_ms)
+      const uint8_t kStablePollsRequired = 2;
+      if (pending.stable_polls >= kStablePollsRequired)
       {
         if (this->debug_)
         {
           std::string debug_output = to_hex(pending.response);
-          ESP_LOGD(TAG, "RTU recv (gap %u ms, %d bytes): %s",
-                   (unsigned)gap_ms, (int)current_size, debug_output.c_str());
+          ESP_LOGD(TAG, "RTU recv (stable %u polls, %d bytes): %s",
+                   (unsigned)pending.stable_polls, (int)current_size, debug_output.c_str());
         }
         if (current_size < 3)
         {
@@ -1277,8 +1277,6 @@ namespace esphome
           if (cl.socket.connected())
             cl.socket.stop();
           this->purge_client_(i, &this->rx_accu8266_);
-          if (i < this->rx_accu8266_.size())
-            this->rx_accu8266_[i].clear();
         }
 #elif defined(USE_ESP32)
         for (size_t i = 0; i < this->clients_.size(); ++i)
@@ -1290,8 +1288,6 @@ namespace esphome
             close(cl.fd);
             cl.fd = -1;
           }
-          if (i < this->rx_accu_.size())
-            this->rx_accu_[i].clear();
         }
 #endif
 
