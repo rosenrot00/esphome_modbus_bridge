@@ -4,6 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting a
 
 | Version   | Changes                                                                           |
 |-----------|-----------------------------------------------------------------------------------|
+| 2025.12.2 | Optimizations to recover after IP loss and tighten RTU frame detection            |
 | 2025.12.1 | For more compatibility a `crc_bytes_swapped` option was added                     |
 | 2025.11.1 | `enabled` was added to allow changing the bridges state during runtime            |
 | 2025.10.3 | Added ESPHome automations for tcp and rtu activities                              |
