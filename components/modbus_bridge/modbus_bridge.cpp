@@ -15,6 +15,7 @@
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
 #include <fcntl.h>
+#include <errno.h>
 #endif
 
 #include "modbus_bridge.h"
@@ -162,7 +163,15 @@ namespace esphome
         int fd = this->clients_[slot].fd;
         if (fd >= 0)
         {
-          send(fd, data, len, 0);
+          int r = send(fd, data, len, 0);
+          if (r < 0)
+          {
+            // Treat send errors as a disconnected client; close and purge slot.
+            ESP_LOGW(TAG, "TCP send failed client_id=%d err=%s", slot, strerror(errno));
+            this->purge_client_((size_t)slot, &this->rx_accu_);
+            close(fd);
+            this->clients_[slot].fd = -1;
+          }
         }
       }
 #endif
@@ -328,13 +337,11 @@ namespace esphome
 #elif defined(USE_ESP32)
         for (size_t i = 0; i < this->clients_.size(); ++i) {
           auto &cl = this->clients_[i];
+          this->purge_client_(i, &this->rx_accu_);
           if (cl.fd >= 0) {
-            this->purge_client_(i, &this->rx_accu_);
             close(cl.fd);
             cl.fd = -1;
           }
-          if (i < this->rx_accu_.size())
-            this->rx_accu_[i].clear();
         }
 #endif
 
@@ -548,7 +555,6 @@ namespace esphome
         req.response.reserve(std::max<size_t>(rx_cap, 256));
       }
       req.start_time = millis();
-      req.last_change = req.start_time;
       req.last_size = 0; // ensure deterministic timeout logic
       req.stable_polls = 0;
       g_frames_in++;
