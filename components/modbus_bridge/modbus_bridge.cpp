@@ -318,14 +318,11 @@ namespace esphome
 #endif
         this->sock_ = -1;
 
-        // Close all existing clients and clear per-client accumulators.
 #if defined(USE_ESP8266)
         for (size_t i = 0; i < this->clients_.size(); ++i) {
           auto &cl = this->clients_[i];
           if (cl.socket.connected())
             cl.socket.stop();
-          if (i < this->rx_accu8266_.size())
-            this->rx_accu8266_[i].clear();
           this->purge_client_(i, &this->rx_accu8266_);
         }
 #elif defined(USE_ESP32)
@@ -420,9 +417,25 @@ namespace esphome
       server_addr.sin_port = htons(this->tcp_port_);
       server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-      bind(this->sock_, (struct sockaddr *)&server_addr, sizeof(server_addr));
+      // Allow quick restart after link flap / reboot
+      int reuse = 1;
+      setsockopt(this->sock_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+      if (bind(this->sock_, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
+      {
+        ESP_LOGE(TAG, "bind failed: %s", strerror(errno));
+        close(this->sock_);
+        this->sock_ = -1;
+        return;
+      }
       int backlog = static_cast<int>(this->tcp_allowed_clients_);
-      listen(this->sock_, backlog);
+      if (listen(this->sock_, backlog) < 0)
+      {
+        ESP_LOGE(TAG, "listen failed: %s", strerror(errno));
+        close(this->sock_);
+        this->sock_ = -1;
+        return;
+      }
 
       // Size clients_ vector to allowed clients and reset fds
       this->clients_.assign(this->tcp_allowed_clients_, TCPClient{});
@@ -444,8 +457,6 @@ namespace esphome
         this->tcp_server_running_ = true;
         this->tcp_started_cb_.call();
       }
-
-      // (Removed duplicate fd initialization)
 #endif
     }
 
@@ -1265,6 +1276,7 @@ namespace esphome
           auto &cl = this->clients_[i];
           if (cl.socket.connected())
             cl.socket.stop();
+          this->purge_client_(i, &this->rx_accu8266_);
           if (i < this->rx_accu8266_.size())
             this->rx_accu8266_[i].clear();
         }
@@ -1272,6 +1284,7 @@ namespace esphome
         for (size_t i = 0; i < this->clients_.size(); ++i)
         {
           auto &cl = this->clients_[i];
+          this->purge_client_(i, &this->rx_accu_);
           if (cl.fd >= 0)
           {
             close(cl.fd);
