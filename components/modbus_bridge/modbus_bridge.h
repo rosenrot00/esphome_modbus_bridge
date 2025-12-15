@@ -52,6 +52,7 @@ namespace esphome
       uint32_t start_time = 0;
       uint32_t last_change = 0;
       size_t last_size = 0; // tracks last observed response size to reset inactivity timer
+      uint8_t stable_polls = 0; // consecutive polls with no new UART bytes
     };
 
     class ModbusBridgeComponent : public Component
