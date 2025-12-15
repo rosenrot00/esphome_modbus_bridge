@@ -1,7 +1,5 @@
 #include <vector>
-#include <memory>
 #include <functional>
-#include <initializer_list>
 #include <cstring>
 #include <cmath>
 #include <algorithm>
@@ -13,7 +11,6 @@
 
 #ifdef USE_ESP32
 #include <lwip/sockets.h>
-#include <lwip/netdb.h>
 #include <fcntl.h>
 #include <errno.h>
 #endif
@@ -154,7 +151,13 @@ namespace esphome
         auto &cl = this->clients_[slot];
         if (cl.socket.connected())
         {
-          cl.socket.write(data, len);
+          size_t w = cl.socket.write(data, len);
+          if (w != len)
+          {
+            ESP_LOGW(TAG, "TCP send failed/short client_id=%d wrote=%u/%u", slot, (unsigned)w, (unsigned)len);
+            cl.socket.stop();
+            this->purge_client_((size_t)slot, &this->rx_accu8266_);
+          }
         }
       }
 #elif defined(USE_ESP32)
@@ -164,10 +167,12 @@ namespace esphome
         if (fd >= 0)
         {
           int r = send(fd, data, len, 0);
-          if (r < 0)
+          if (r < 0 || r != (int)len)
           {
-            // Treat send errors as a disconnected client; close and purge slot.
-            ESP_LOGW(TAG, "TCP send failed client_id=%d err=%s", slot, strerror(errno));
+            // Treat send errors/short writes as a disconnected client; close and purge slot.
+            const unsigned wrote = (r < 0) ? 0U : (unsigned)r;
+            ESP_LOGW(TAG, "TCP send failed/short client_id=%d wrote=%u/%u err=%s", slot, wrote, (unsigned)len,
+                     (r < 0) ? strerror(errno) : "short");
             this->purge_client_((size_t)slot, &this->rx_accu_);
             close(fd);
             this->clients_[slot].fd = -1;
@@ -800,14 +805,7 @@ namespace esphome
       {
         return; // Skip accept/read logic while disabled
       }
-      if (this->rx_accu_.size() < this->clients_.size())
-      {
-        this->rx_accu_.resize(this->clients_.size());
-      }
-      else if (this->rx_accu_.size() > this->clients_.size())
-      {
-        this->rx_accu_.resize(this->clients_.size());
-      }
+      this->rx_accu_.resize(this->clients_.size());
       for (auto &v : this->rx_accu_)
       {
         if (v.capacity() < kTcpAccuCap)
@@ -1136,7 +1134,6 @@ namespace esphome
         this->polling_active_ = false;
       };
 
-      size_t before = pending.response.size();
       size_t avail = this->uart_->available();
       if (avail)
       {
