@@ -28,7 +28,7 @@ The bridge listens on a configurable TCP port (default: 502) and expects standar
 - Compatible with Home Assistant and third‑party Modbus TCP tools
 
 #### Proven Compatibility
-
+- [nilan-cts600-homeassistant](https://github.com/frodef/nilan-cts600-homeassistant) thanks to @RichardIstSauer
 - [ha-solarman](https://github.com/davidrapan/ha-solarman) thanks to @davidrapan
 - [Marstek Venus Battery](https://github.com/ViperRNMC/marstek_venus_modbus) thanks to @ebbenberg
 - [homeassistant-solax-modbus](https://github.com/wills106/homeassistant-solax-modbus)
