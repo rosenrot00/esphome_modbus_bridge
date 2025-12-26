@@ -12,6 +12,7 @@ CONF_TCP_ALLOWED_CLIENTS = "tcp_allowed_clients"
 CONF_FLOW_CONTROL_PIN = "flow_control_pin"
 CONF_CRC_BYTES_SWAPPED = "crc_bytes_swapped"
 CONF_ENABLED = "enabled"
+CONF_UART_WAKE_LOOP_ON_RX = "uart_wake_loop_on_rx"
 
 CONF_ON_COMMAND_SENT = "on_command_sent"
 CONF_ON_RTU_SEND = "on_rtu_send"
@@ -36,6 +37,7 @@ BASE_SCHEMA = cv.Schema(
         cv.Optional(CONF_TCP_ALLOWED_CLIENTS, default=2): cv.positive_int,
         cv.Optional(CONF_CRC_BYTES_SWAPPED, default=False): cv.boolean,
         cv.Optional(CONF_ENABLED, default=True): cv.boolean,
+        cv.Optional(CONF_UART_WAKE_LOOP_ON_RX, default=False): cv.boolean,
         # Expose bridge-global events to YAML automations
         cv.Optional(CONF_ON_COMMAND_SENT): automation.validate_automation(
             {
@@ -99,6 +101,9 @@ async def to_code(config):
         await cg.register_component(var, conf)
 
         uart_comp = await cg.get_variable(conf["uart_id"])
+        # Optional: request low-latency UART RX wake-up (enables USE_UART_WAKE_LOOP_ON_RX)
+        if conf.get(CONF_UART_WAKE_LOOP_ON_RX):
+            uart.request_wake_loop_on_rx()
         cg.add(var.set_uart_id(uart_comp))
         cg.add(var.set_tcp_port(conf[CONF_TCP_PORT]))
         cg.add(var.set_tcp_poll_interval(conf[CONF_TCP_POLL_INTERVAL]))
