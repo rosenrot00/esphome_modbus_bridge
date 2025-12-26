@@ -4,6 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting a
 
 | Version   | Changes                                                                           |
 |-----------|-----------------------------------------------------------------------------------|
+| 2025.12.3 | Added `uart_wake_loop_on_rx` to enable ESPHome’s low-latency UART flag            |
 | 2025.12.2 | Optimizations to recover after IP loss and tighten RTU frame detection            |
 | 2025.12.1 | For more compatibility a `crc_bytes_swapped` option was added                     |
 | 2025.11.1 | `enabled` was added to allow changing the bridges state during runtime            |
@@ -128,6 +129,7 @@ modbus_bridge:
   # flow_control_pin: GPIO18     # Optional: RS-485 DE/RE pin
   # crc_bytes_swapped: false     # allows to swap CRC byte order LO/HI -> HI/LO
   # enabled: true                # allows to enable or disable during runtime
+  # uart_wake_loop_on_rx: true   # enable ESPHome's UART low latency setting (effects not yet tested)
 
   # Event: triggered whenever number of TCP clients changes
   on_tcp_clients_changed:
