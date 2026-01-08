@@ -264,6 +264,11 @@ python modbus_rw.py --host 192.168.0.10 --register 0x0010 --count 2 --read_input
 ```
 python modbus_rw.py --host 192.168.0.10 --register 0x0010 --value 0x1234
 ```
+- Read Holding Registers with USB/serial adapter (FC 0x03)
+```
+python modbus_rw.py --serial-port /dev/ttyUSB0 --baudrate 19200 --parity E --register 0x0010 --count 2 --read
+```
+
 #### Requirements
 - Python 3.x  
 - pymodbus ≤3.9.x library (let me know if you need it compatible with >3.10)
