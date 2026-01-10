@@ -78,6 +78,16 @@ namespace esphome
       void set_enabled(bool enabled);
       bool is_enabled() const;
 
+      // Lightweight runtime stats (monotonic counters)
+      uint32_t get_frames_in() const;
+      uint32_t get_frames_out() const;
+      uint32_t get_drops_pid() const;
+      uint32_t get_drops_len() const;
+      uint32_t get_timeouts() const;
+      uint32_t get_clients_connected_total() const;
+      uint32_t get_noslot_events() const;
+      uint32_t get_preempt_events() const;
+
       // NEW – optional RS-485 DE/RE control pin (only used if set)
       void set_flow_control_pin(GPIOPin *pin) { flow_control_pin_ = pin; }
 
