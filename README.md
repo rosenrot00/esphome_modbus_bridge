@@ -4,6 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting a
 
 | Version   | Changes                                                                           |
 |-----------|-----------------------------------------------------------------------------------|
+| 2026.01.1 | TCP client drops, RTU timeouts, and others are now available to use as HA sensors |
 | 2025.12.3 | Added `uart_wake_loop_on_rx` to enable ESPHome’s low-latency UART flag            |
 | 2025.12.2 | Optimizations to recover after IP loss and tighten RTU frame detection            |
 | 2025.12.1 | For more compatibility a `crc_bytes_swapped` option was added                     |
