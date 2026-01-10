@@ -1325,5 +1325,16 @@ namespace esphome
       return this->enabled_;
     }
 
+    // --- Runtime stats getters ----------------------------------------------------
+
+    uint32_t ModbusBridgeComponent::get_frames_in() const { return g_frames_in; }
+    uint32_t ModbusBridgeComponent::get_frames_out() const { return g_frames_out; }
+    uint32_t ModbusBridgeComponent::get_drops_pid() const { return g_drops_pid; }
+    uint32_t ModbusBridgeComponent::get_drops_len() const { return g_drops_len; }
+    uint32_t ModbusBridgeComponent::get_timeouts() const { return g_timeouts; }
+    uint32_t ModbusBridgeComponent::get_clients_connected_total() const { return g_clients_connected; }
+    uint32_t ModbusBridgeComponent::get_noslot_events() const { return g_noslot_events; }
+    uint32_t ModbusBridgeComponent::get_preempt_events() const { return g_preempt_events; }
+
   } // namespace modbus_bridge
 } // namespace esphome
