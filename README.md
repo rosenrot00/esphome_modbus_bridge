@@ -139,6 +139,10 @@ modbus_bridge:
       - logger.log:
           format: "TCP clients connected: %d"
           args: ['count']
+      - sensor.template.publish:
+            id: mb_tcp_clients
+            state: !lambda |-
+              return (int) count;
 
   # Other available events (use similarly):
   # on_rtu_send:       # (function_code, address) – triggered for every RTU command sent
@@ -210,6 +214,69 @@ switch:
     turn_off_action:
       - lambda: |-
           id(mb_bridge).set_enabled(false);
+
+sensor:
+  - platform: template
+    name: "TCP Clients"
+    id: mb_tcp_clients
+    accuracy_decimals: 0
+    update_interval: never
+
+  #- platform: template
+  #  name: "MB Frames In"
+  #  accuracy_decimals: 0
+  #  update_interval: 10s
+  #  lambda: |-
+  #    return (float) id(mb_bridge).get_frames_in();
+
+  #- platform: template
+  #  name: "MB Frames Out"
+  #  accuracy_decimals: 0
+  #  update_interval: 10s
+  #  lambda: |-
+  #    return (float) id(mb_bridge).get_frames_out();
+
+  - platform: template
+    name: "TCP Drops PID"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      return (int) id(mb_bridge).get_drops_pid();
+
+  - platform: template
+    name: "Drops LEN"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      return (int) id(mb_bridge).get_drops_len();
+
+  - platform: template
+    name: "RTU Timeouts"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      return (int) id(mb_bridge).get_timeouts();
+
+  - platform: template
+    name: "TCP Clients Total"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      return (int) id(mb_bridge).get_clients_connected_total();
+
+  - platform: template
+    name: "TCP No Slot Events"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      return (int) id(mb_bridge).get_noslot_events();
+
+  - platform: template
+    name: "TCP Preempt Events"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      return (int) id(mb_bridge).get_preempt_events();
 ```
 
 #### Modbus TCP Request Format
