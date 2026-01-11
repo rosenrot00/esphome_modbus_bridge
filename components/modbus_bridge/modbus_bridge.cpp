@@ -54,22 +54,29 @@ namespace esphome
 
     // --- Helpers to reduce duplication ---------------------------------------------------------
 
-    // Cheap hex conversion for debug logs
-    static inline std::string to_hex(const uint8_t *data, size_t n)
+    // Cheap hex conversion for debug logs (truncate to avoid blocking the main loop)
+    static inline std::string to_hex(const uint8_t *data, size_t n, size_t max_bytes = 64)
     {
+      const size_t m = std::min(n, max_bytes);
       std::string s;
-      s.reserve(n * 3);
-      for (size_t i = 0; i < n; ++i)
+      s.reserve(m * 3 + 24);
+      for (size_t i = 0; i < m; ++i)
       {
         char t[4];
         sprintf(t, "%02X ", data[i]);
         s += t;
       }
+      if (n > m)
+      {
+        char tail[32];
+        sprintf(tail, "…(+%u bytes)", (unsigned)(n - m));
+        s += tail;
+      }
       return s;
     }
-    static inline std::string to_hex(const std::vector<uint8_t> &v)
+    static inline std::string to_hex(const std::vector<uint8_t> &v, size_t max_bytes = 64)
     {
-      return to_hex(v.data(), v.size());
+      return to_hex(v.data(), v.size(), max_bytes);
     }
 
     // Drain UART RX (templated to avoid pulling specific UART headers here)
@@ -872,7 +879,8 @@ namespace esphome
         }
       }
 
-      struct timeval timeout = {0, 0};
+      // Small timeout to yield to lwIP / logger and avoid starvation when logs are streaming
+      struct timeval timeout = {0, 2000}; // 2 ms
       int sel = lwip_select(maxfd + 1, &read_fds, NULL, NULL, &timeout);
       if (sel < 0)
         return;
@@ -886,7 +894,8 @@ namespace esphome
         {
           char client_ip[INET_ADDRSTRLEN];
           inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-          ESP_LOGD(TAG, "TCP accept %s:%d", client_ip, ntohs(client_addr.sin_port));
+          if (this->debug_)
+            ESP_LOGD(TAG, "TCP accept %s:%d", client_ip, ntohs(client_addr.sin_port));
 
           // Check for duplicates: same IP and port
           bool duplicate = false;
@@ -1207,7 +1216,7 @@ namespace esphome
         if (this->debug_)
         {
           std::string tcp_debug = to_hex(tcp_response);
-          ESP_LOGD(TAG, "RTU->TCP response: %s", tcp_debug.c_str());
+          //ESP_LOGD(TAG, "RTU->TCP response: %s", tcp_debug.c_str());
           ESP_LOGD(TAG, "Response time: %ums", millis() - pending.start_time);
         }
         this->send_to_client_(pending.client_fd, tcp_response.data(), tcp_response.size());
