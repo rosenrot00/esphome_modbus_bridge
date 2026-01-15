@@ -9,7 +9,8 @@ CONF_TCP_POLL_INTERVAL = "tcp_poll_interval"
 CONF_TCP_CLIENT_TIMEOUT = "tcp_client_timeout"
 CONF_RTU_RESPONSE_TIMEOUT = "rtu_response_timeout"
 CONF_TCP_ALLOWED_CLIENTS = "tcp_allowed_clients"
-CONF_FLOW_CONTROL_PIN = "flow_control_pin"
+CONF_DE_PIN = "de_pin"
+CONF_RE_PIN = "re_pin"
 CONF_CRC_BYTES_SWAPPED = "crc_bytes_swapped"
 CONF_ENABLED = "enabled"
 CONF_UART_WAKE_LOOP_ON_RX = "uart_wake_loop_on_rx"
@@ -29,7 +30,8 @@ BASE_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(ModbusBridgeComponent),
         cv.Required("uart_id"): cv.use_id(uart.UARTComponent),
-        cv.Optional(CONF_FLOW_CONTROL_PIN): pins.gpio_output_pin_schema,
+        cv.Optional(CONF_DE_PIN): pins.gpio_output_pin_schema,
+        cv.Optional(CONF_RE_PIN): pins.gpio_output_pin_schema,
         cv.Optional(CONF_TCP_PORT, default=502): cv.port,
         cv.Optional(CONF_TCP_POLL_INTERVAL, default=50): cv.positive_int,
         cv.Optional(CONF_TCP_CLIENT_TIMEOUT, default=60000): cv.positive_int,
@@ -155,7 +157,11 @@ async def to_code(config):
                 cg.add(var.add_on_tcp_clients_changed_callback(cb))
                 await automation.build_automation(trig, [(cg.int_, "count")], ac)
 
-        # optional RS-485 DE/RE flow control pin
-        if CONF_FLOW_CONTROL_PIN in conf:
-            pin = await cg.gpio_pin_expression(conf[CONF_FLOW_CONTROL_PIN])
-            cg.add(var.set_flow_control_pin(pin))
+        # optional RS-485 DE and /RE pins
+        if CONF_DE_PIN in conf:
+            de_pin = await cg.gpio_pin_expression(conf[CONF_DE_PIN])
+            cg.add(var.set_de_pin(de_pin))
+
+        if CONF_RE_PIN in conf:
+            re_pin = await cg.gpio_pin_expression(conf[CONF_RE_PIN])
+            cg.add(var.set_re_pin(re_pin))
