@@ -4,6 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting a
 
 | Version   | Changes                                                                           |
 |-----------|-----------------------------------------------------------------------------------|
+| 2026.01.2 | Added separate RS-485 `de_pin` and `re_pin`; removed `flow_control_pin`           |
 | 2026.01.1 | TCP client drops, RTU timeouts, and others are now available to use as HA sensors |
 | 2025.12.3 | Added `uart_wake_loop_on_rx` to enable ESPHome’s low-latency UART flag            |
 | 2025.12.2 | Optimizations to recover after IP loss and tighten RTU frame detection            |
@@ -12,7 +13,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting a
 | 2025.10.3 | Added ESPHome automations for tcp and rtu activities                              |
 | 2025.10.2 | Introduced T1.5 waiting time for better modbus rtu frame detection on lower bauds |
 | 2025.10.1 | Implemented support for multiple bridges to be used with multiple UART interfaces |
-| 2025.09.1 | Added configurable `flow_control_pin` with inverted option                        |
+| 2025.09.1 | Added configurable RS-485 `de_pin` / `re_pin` support (separate or shared GPIO)   |
 | 2025.08.2 | Improved RTU response handling (silence-based end detection)                      |
 | 2025.08.1 | Added support for multiple concurrent TCP clients with preemption logic           |
 | 2025.07.1 | Initial public README and Python `modbus_rw.py` tool                              |
@@ -28,6 +29,7 @@ The bridge listens on a configurable TCP port (default: 502) and expects standar
 - Works with all Modbus function codes
 - Optional same‑IP preemption when slots are full
 - Compatible with Home Assistant and third‑party Modbus TCP tools
+- Supports RS-485 transceivers with separate DE and /RE pins or a single shared control GPIO
 
 #### Proven Compatibility
 - [nilan-cts600-homeassistant](https://github.com/frodef/nilan-cts600-homeassistant) thanks to @RichardIstSauer
@@ -127,7 +129,9 @@ modbus_bridge:
   # tcp_client_timeout: 60000    # ms of inactivity before client is disconnected
   # tcp_allowed_clients: 2       # number of simultaneous TCP clients (min 1)
   # tcp_poll_interval: 50        # ms between TCP polls
-  # flow_control_pin: GPIO18     # Optional: RS-485 DE/RE pin
+  # de_pin: GPIO18               # Optional: RS-485 Driver Enable (DE)
+  # re_pin: GPIO19               # Optional: RS-485 Receiver Enable (/RE) - de_pin and re_pin can be the same GPIO
+  # (DE and /RE may be the same GPIO if the transceiver ties them together)
   # crc_bytes_swapped: false     # allows to swap CRC byte order LO/HI -> HI/LO
   # enabled: true                # allows to enable or disable during runtime
   # uart_wake_loop_on_rx: true   # enable ESPHome's UART low latency setting (effects not yet tested)
