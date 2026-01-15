@@ -253,14 +253,18 @@ namespace esphome
 
     inline void ModbusBridgeComponent::rs485_set_tx_(bool en)
     {
-      if (!this->flow_control_pin_)
-        return;
-      this->flow_control_pin_->digital_write(en);
+      // Support separate DE and /RE pins.
+      // If both are provided, drive them with the same level so a single GPIO can be used for both.
+      // Typical RS-485 transceivers use /RE active-low, so tying DE and /RE together works by driving the same signal.
+      if (this->de_pin_ != nullptr)
+        this->de_pin_->digital_write(en);
+      if (this->re_pin_ != nullptr)
+        this->re_pin_->digital_write(en);
     }
 
     inline void ModbusBridgeComponent::rs485_begin_tx_()
     {
-      if (!this->flow_control_pin_)
+      if (this->de_pin_ == nullptr && this->re_pin_ == nullptr)
         return;
       this->rs485_set_tx_(true);
       if (this->char_time_us_ > 0)
@@ -272,7 +276,7 @@ namespace esphome
 
     inline void ModbusBridgeComponent::rs485_end_tx_()
     {
-      if (!this->flow_control_pin_)
+      if (this->de_pin_ == nullptr && this->re_pin_ == nullptr)
         return;
       // ensure last stop bit left the wire
       if (this->char_time_us_ > 0)
@@ -308,10 +312,17 @@ namespace esphome
       this->baud_cache_ = _br_setup_guard;
       this->char_time_us_ = calc_char_time_us_(this->baud_cache_);
 
-      if (this->flow_control_pin_)
+      // Optional RS-485 DE and /RE pins
+      // Drive both with the same level so it works if they are separate GPIOs or the same GPIO is used for both.
+      if (this->de_pin_ != nullptr)
       {
-        this->flow_control_pin_->setup();              // output
-        this->flow_control_pin_->digital_write(false); // RX mode (DE/RE low)
+        this->de_pin_->setup();              // output
+        this->de_pin_->digital_write(false); // RX mode (DE low)
+      }
+      if (this->re_pin_ != nullptr)
+      {
+        this->re_pin_->setup();              // output
+        this->re_pin_->digital_write(false); // RX mode (/RE low)
       }
 
       this->set_interval("tcp_server_and_network_check", 1000, [this]()
