@@ -88,8 +88,9 @@ namespace esphome
       uint32_t get_noslot_events() const;
       uint32_t get_preempt_events() const;
 
-      // NEW – optional RS-485 DE/RE control pin (only used if set)
-      void set_flow_control_pin(GPIOPin *pin) { flow_control_pin_ = pin; }
+      // Optional RS-485 DE and /RE control pins
+      void set_de_pin(GPIOPin *pin) { de_pin_ = pin; }
+      void set_re_pin(GPIOPin *pin) { re_pin_ = pin; }
 
       // Bridge-global automation adders (events carry function_code and start_address)
       void add_on_command_sent_callback(std::function<void(int, int)> &&cb) { command_sent_cb_.add(std::move(cb)); }
@@ -132,8 +133,9 @@ namespace esphome
       uint32_t baud_cache_{0};
       uint32_t char_time_us_{0};
 
-      // NEW – optional RS-485 DE/RE pin
-      GPIOPin *flow_control_pin_{nullptr};
+      // Optional RS-485 DE and /RE pins
+      GPIOPin *de_pin_{nullptr};
+      GPIOPin *re_pin_{nullptr};
 
       // Bridge-global event callbacks
       esphome::CallbackManager<void(int, int)> command_sent_cb_;
@@ -158,7 +160,7 @@ namespace esphome
       void send_to_client_(int slot, const uint8_t *data, size_t len);
       void purge_client_(size_t idx, std::vector<std::vector<uint8_t>> *accu_opt);
 
-      // RS-485 helpers (no-ops when flow_control_pin_ is null)
+      // RS-485 helpers (no-ops when neither DE nor /RE pin is set)
       void rs485_begin_tx_();
       void rs485_end_tx_();
       void rs485_set_tx_(bool en);
