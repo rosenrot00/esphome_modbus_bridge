@@ -400,22 +400,22 @@ namespace esphome
       this->polling_active_ = false;
 
       // Periodic status log (debug only)
-      this->set_interval("status_log", 10'000, [this]()
-                         {
-    if (!this->debug_) return;
-    size_t clients_active = 0;
-#if defined(USE_ESP8266)
-    for (auto &cl : this->clients_) if (cl.socket.connected()) clients_active++;
-#elif defined(USE_ESP32)
-    for (auto &cl : this->clients_) if (cl.fd >= 0) clients_active++;
-#endif
-    ESP_LOGD(TAG,
-            "stats: in=%u out=%u drops(pid)=%u drops(len)=%u timeouts=%u clients_active=%u clients_total=%u noslot=%u preempt=%u",
-            (unsigned)g_frames_in, (unsigned)g_frames_out, (unsigned)g_drops_pid,
-            (unsigned)g_drops_len, (unsigned)g_timeouts,
-            (unsigned)clients_active, (unsigned)g_clients_connected,
-            (unsigned)g_noslot_events, (unsigned)g_preempt_events); });
-    }
+      this->set_interval("status_log", 10000, [this]()
+      {
+        if (!this->debug_) return;
+        size_t clients_active = 0;
+        #if defined(USE_ESP8266)
+            for (auto &cl : this->clients_) if (cl.socket.connected()) clients_active++;
+        #elif defined(USE_ESP32)
+            for (auto &cl : this->clients_) if (cl.fd >= 0) clients_active++;
+        #endif
+        ESP_LOGD(TAG,
+                "stats: in=%u out=%u drops(pid)=%u drops(len)=%u timeouts=%u clients_active=%u clients_total=%u noslot=%u preempt=%u",
+                (unsigned)g_frames_in, (unsigned)g_frames_out, (unsigned)g_drops_pid,
+                (unsigned)g_drops_len, (unsigned)g_timeouts,
+                (unsigned)clients_active, (unsigned)g_clients_connected,
+                (unsigned)g_noslot_events, (unsigned)g_preempt_events); });
+      }
 
     void ModbusBridgeComponent::initialize_tcp_server_()
     {
