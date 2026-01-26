@@ -35,7 +35,7 @@ namespace esphome
     static constexpr size_t kTcpAccuCap8266 = 1024;
     static constexpr size_t kMaxFramesPerLoop = 8;
     // Runtime toggle: preempt oldest same-IP connection when full
-    static bool kPreemptSameIP = true; // auf false setzen, um zu deaktivieren
+    static bool kPreemptSameIP = true;
 
     // Centralized caps
     static constexpr uint16_t MODBUS_TCP_LEN_CAP = 260;            // UID+PDU (LEN field)
