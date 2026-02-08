@@ -15,7 +15,6 @@ CONF_CRC_BYTES_SWAPPED = "crc_bytes_swapped"
 CONF_ENABLED = "enabled"
 CONF_UART_WAKE_LOOP_ON_RX = "uart_wake_loop_on_rx"
 
-CONF_ON_COMMAND_SENT = "on_command_sent"
 CONF_ON_RTU_SEND = "on_rtu_send"
 CONF_ON_RTU_RECEIVE = "on_rtu_receive"
 CONF_ON_RTU_TIMEOUT = "on_rtu_timeout"
@@ -35,19 +34,12 @@ BASE_SCHEMA = cv.Schema(
         cv.Optional(CONF_TCP_PORT, default=502): cv.port,
         cv.Optional(CONF_TCP_POLL_INTERVAL, default=50): cv.positive_int,
         cv.Optional(CONF_TCP_CLIENT_TIMEOUT, default=60000): cv.positive_int,
-        cv.Optional(CONF_RTU_RESPONSE_TIMEOUT, default=100): cv.positive_int,
+        cv.Optional(CONF_RTU_RESPONSE_TIMEOUT, default=100): cv.int_range(min=10),
         cv.Optional(CONF_TCP_ALLOWED_CLIENTS, default=2): cv.positive_int,
         cv.Optional(CONF_CRC_BYTES_SWAPPED, default=False): cv.boolean,
         cv.Optional(CONF_ENABLED, default=True): cv.boolean,
         cv.Optional(CONF_UART_WAKE_LOOP_ON_RX, default=False): cv.boolean,
         # Expose bridge-global events to YAML automations
-        cv.Optional(CONF_ON_COMMAND_SENT): automation.validate_automation(
-            {
-                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
-                    automation.Trigger.template(cg.int_, cg.int_)
-                )
-            }
-        ),
         cv.Optional(CONF_ON_RTU_SEND): automation.validate_automation(
             {
                 cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(
@@ -129,9 +121,8 @@ async def to_code(config):
                         trig, [(cg.int_, "function_code"), (cg.int_, "address")], ac
                     )
 
-        await _bind(CONF_ON_COMMAND_SENT, "add_on_command_sent_callback")
         # RTU-centric events
-        await _bind(CONF_ON_RTU_SEND, "add_on_command_sent_callback")  # alias: RTU send
+        await _bind(CONF_ON_RTU_SEND, "add_on_command_sent_callback")
         await _bind(CONF_ON_RTU_RECEIVE, "add_on_rtu_receive_callback")
         await _bind(CONF_ON_RTU_TIMEOUT, "add_on_rtu_timeout_callback")
 
