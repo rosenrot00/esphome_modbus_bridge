@@ -93,7 +93,6 @@ uart:
   tx_pin: GPIO17
   rx_pin: GPIO16
   baud_rate: 9600
-  rx_buffer_size: 256
 
 modbus_bridge:
   id: mb_bridge
@@ -158,7 +157,7 @@ uart:
   baud_rate: 9600
   # stop_bits: 1                 # Optional: Default is 1
   # parity: NONE                 # Optional: Default is NONE
-  rx_buffer_size: 256            # minimum 256 recommended; increase for long RTU responses
+  rx_buffer_size: 512            # default is 256; increase for long RTU responses
 
 # Modbus bridge configuration: TCP server <-> UART RTU translator
 modbus_bridge:
