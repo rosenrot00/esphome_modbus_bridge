@@ -1,16 +1,17 @@
 # ESPHome (ESP8266/ESP32) Modbus TCP to RTU Bridge
 
-This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting as a Modbus RTU master over UART on both ESP8266 and ESP32 platforms. It allows multiple Modbus TCP clients to communicate with Modbus RTU slaves via RS485 or other UART-compatible hardware.
+This ESPHome component provides a transparent Modbus TCP-to-RTU bridge for ESP8266 and ESP32. It acts as a Modbus RTU master over UART and allows multiple Modbus TCP clients to communicate with Modbus RTU slaves via RS485 (or other UART-compatible interfaces).
 
-| Version   | Changes                                                                           |
-|-----------|-----------------------------------------------------------------------------------|
-| 2026.01.2 | Added separate RS-485 `de_pin` and `re_pin`; removed `flow_control_pin`           |
+| Version | Changes |
+|---|---|
+| 2026.02.1 | UART polling lifecycle fixed, RTU timeout is now direct (default 100 ms), and TCP frame parsing was optimized |
+| 2026.01.2 | Added separate RS-485 `de_pin` and `re_pin`; removed `flow_control_pin` |
 | 2026.01.1 | TCP client drops, RTU timeouts, and others are now available to use as HA sensors |
-| 2025.12.3 | Added `uart_wake_loop_on_rx` to enable ESPHome’s low-latency UART flag            |
-| 2025.12.2 | Optimizations to recover after IP loss and tighten RTU frame detection            |
-| 2025.12.1 | For more compatibility a `crc_bytes_swapped` option was added                     |
-| 2025.11.1 | `enabled` was added to allow changing the bridges state during runtime            |
-| 2025.10.3 | Added ESPHome automations for tcp and rtu activities                              |
+| 2025.12.3 | Added `uart_wake_loop_on_rx` to enable ESPHome’s low-latency UART flag |
+| 2025.12.2 | Optimizations to recover after IP loss and tighten RTU frame detection |
+| 2025.12.1 | For more compatibility a `crc_bytes_swapped` option was added |
+| 2025.11.1 | `enabled` was added to allow changing the bridges state during runtime |
+| 2025.10.3 | Added ESPHome automations for tcp and rtu activities |
 | 2025.10.2 | Introduced T1.5 waiting time for better modbus rtu frame detection on lower bauds |
 | 2025.10.1 | Implemented support for multiple bridges to be used with multiple UART interfaces |
 | 2025.09.1 | Added configurable RS-485 `de_pin` / `re_pin` support (separate or shared GPIO)   |
@@ -22,14 +23,14 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge, acting a
 
 The bridge listens on a configurable TCP port (default: 502) and expects standard Modbus TCP frames from clients. Each request is translated into a Modbus RTU frame, transmitted over UART, and the response is converted back into Modbus TCP and returned to the client.
 
-- Acts as a Modbus RTU master on UART
-- Multiple concurrent Modbus TCP clients (slot‑limited)
-- TCP↔RTU translation both ways
-- RTU end‑of‑frame via UART silence (no byte count needed)
-- Works with all Modbus function codes
-- Optional same‑IP preemption when slots are full
-- Compatible with Home Assistant and third‑party Modbus TCP tools
-- Supports RS-485 transceivers with separate DE and /RE pins or a single shared control GPIO
+- Connect Modbus TCP software to Modbus RTU devices over one ESP
+- Works on both ESP32 and ESP8266
+- Supports multiple TCP clients at the same time
+- Configurable port, timeouts, and client limits
+- Supports RS-485 transceivers with separate `DE`/`RE` pins or one shared GPIO
+- Can run multiple bridges in one node (for multiple UART buses)
+- Auto-recovers after network/IP loss
+- Integrates easily with Home Assistant and ESPHome automations
 
 #### Proven Compatibility
 - [nilan-cts600-homeassistant](https://github.com/frodef/nilan-cts600-homeassistant) thanks to @RichardIstSauer
@@ -40,27 +41,66 @@ The bridge listens on a configurable TCP port (default: 502) and expects standar
 #### Hardware Setup
 The following diagram shows how an ESP32 is connected to an RS485 transceiver (e.g., MAX3485, SP3485, SN65HVD…) before the RS485 differential lines are attached to a Modbus bus.
 ```
-             +--------------------+         +---------------------------+
-             |        ESP32       |         |      RS485 Transceiver    |
-             |       ESP8266      |         |   (e.g. MAX3485/SP3485)   |
-             +--------------------+         +---------------------------+
-             | GPIO TX (UART TX)  |-------->| DI        (Data In)       |
-             | GPIO RX (UART RX)  |<--------| RO        (Receiver Out)  |
-             | GPIO DE (Driver En)|-------->| DE        (Driver Enable) |
-             | GPIO RE (Recv En)  |-------->| /RE       (Recv Enable)   |
-             | GND                |---------| GND                       |
-             +--------------------+         +------------+--------------+
-                                                     |
-                                                     |
-                                                     |   RS485 differential pair
-                                                     |   (before connecting to Modbus)
-                                                     |
-                                              +------+------+ 
-                                              |   A   |   B |
-                                              +------+------+
+   +---------------------------+        +----------------------------------+
+   | ESP32 / ESP8266           |        | RS485 Transceiver                |
+   | (UART side)               |        | (e.g. MAX3485 / SP3485 / SN65HVD)|
+   +---------------------------+        +----------------------------------+
+   | TX (UART TX)  -----------+------->| DI   (Driver Input)               |
+   | RX (UART RX)  <----------+--------| RO   (Receiver Output)            |
+   | DE (optional) -----------+------->| DE   (Driver Enable)              |
+   | RE (optional) -----------+------->| /RE  (Receiver Enable, low=ON)    |
+   | GND ---------------------+--------| GND                               |
+   +---------------------------+        +----------------------------------+
+                                                     |              |
+                                                     |              |
+                                                     v              v
+                                                 A ---------------- B
+                                              RS485 differential pair
+```
+`DE` and `RE` may be wired to the same GPIO if your transceiver ties `DE` and `/RE` together.
+
+#### ESPHome Configuration Examples
+
+##### Minimal YAML
+
+```yaml
+esphome:
+  name: modbus-bridge
+  friendly_name: Modbus TCP-to-RTU bridge
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+api:
+ota:
+  platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/rosenrot00/esphome_modbus_bridge
+    components: [modbus_bridge]
+
+uart:
+  id: uart_bus
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 9600
+  rx_buffer_size: 256
+
+modbus_bridge:
+  id: mb_bridge
+  uart_id: uart_bus
 ```
 
-#### ESPHome Configuration Example
+##### Full YAML (all options, automations, sensors)
 
 ```yaml
 esphome:
@@ -125,7 +165,7 @@ modbus_bridge:
   id: mb_bridge
   uart_id: uart_bus
   tcp_port: 502                  # TCP port to listen on
-  rtu_response_timeout: 3000     # ms, internally clamped to >=10 ms
+  #rtu_response_timeout: 100      # ms, internally clamped to >=10 ms
   # tcp_client_timeout: 60000    # ms of inactivity before client is disconnected
   # tcp_allowed_clients: 2       # number of simultaneous TCP clients (min 1)
   # tcp_poll_interval: 50        # ms between TCP polls
@@ -306,21 +346,40 @@ Example (read holding registers, unit ID 1, starting at 0x0000, count 1):
 ```
 The response will match the Modbus TCP format and contain the same transaction ID.
 
-## modbus_rw.py – Modbus TCP Register Read/Write Tool
+## modbus_rw.py – Modbus TCP/RTU Register Read/Write Tool
 
-`modbus_rw.py` is a simple command-line utility for reading and writing Modbus TCP registers using the `pymodbus` library.  
-It supports reading Holding Registers (Function Code 0x03), Input Registers (0x04), and writing a single Holding Register (0x06).  
-This tool is useful for testing, diagnostics, or integrating Modbus-capable devices in a network environment.
+`modbus_rw.py` is a simple command-line utility for reading and writing Modbus registers using `pymodbus`.
+It supports:
+- Modbus TCP mode (`--host`, optional `--tcp-port`)
+- Modbus RTU serial mode (`--serial-port`, optional serial settings)
+
+Use exactly one mode per call:
+- TCP: set `--host`
+- RTU: set `--serial-port`
+
+It supports reading Holding Registers (Function Code 0x03), Input Registers (0x04), and writing a single Holding Register (0x06).
+
 #### Arguments
 ```
---host         Modbus TCP server IP address (required)
---port         Modbus TCP port (default: 502)
---unit         Modbus unit ID / slave ID (default: 1)
---register     Register address to read/write (decimal or hex, e.g. 0x10) (required)
---count        Number of registers to read (default: 1)
---value        Value to write to register (used for write operation)
---read         Read Holding Registers (Function Code 0x03)
---read_input   Read Input Registers (Function Code 0x04)
+[Mode selection]
+--host           Modbus TCP server IP (TCP mode)
+--tcp-port       Modbus TCP port (default: 502)
+--serial-port    Serial port (RTU mode), e.g. /dev/ttyUSB0 or COM3
+
+[RTU serial options]
+--baudrate       RTU baudrate (default: 9600)
+--parity         RTU parity: N/E/O (default: N)
+--stopbits       RTU stop bits: 1/2 (default: 1)
+--bytesize       RTU byte size: 7/8 (default: 8)
+
+[Common options]
+--timeout        Request timeout in seconds (default: 1.0)
+--unit           Modbus unit/slave ID (default: 1)
+--register       Register address (decimal or hex, required)
+--count          Number of registers to read (default: 1)
+--value          Value to write (decimal or hex)
+--read           Read Holding Registers (FC 0x03)
+--read_input     Read Input Registers (FC 0x04)
 ```
 #### Examples
 
