@@ -44,7 +44,8 @@ namespace esphome
     static uint32_t g_frames_in = 0;
     static uint32_t g_frames_out = 0;
     static uint32_t g_drops_pid = 0;
-    static uint32_t g_drops_len = 0;
+    static uint32_t g_drops_tcp_len = 0;
+    static uint32_t g_drops_rtu_incomplete = 0;
     static uint32_t g_timeouts = 0;
     static uint32_t g_clients_connected = 0;
     static uint32_t g_noslot_events = 0;  // number of times a new client was rejected due to no free slot
@@ -399,9 +400,9 @@ namespace esphome
             for (auto &cl : this->clients_) if (cl.fd >= 0) clients_active++;
         #endif
         ESP_LOGD(TAG,
-                "stats: in=%u out=%u drops(pid)=%u drops(len)=%u timeouts=%u clients_active=%u clients_total=%u noslot=%u preempt=%u",
+                "stats: in=%u out=%u drops(pid)=%u drops(tcp_len)=%u drops(rtu_incomplete)=%u timeouts=%u clients_active=%u clients_total=%u noslot=%u preempt=%u",
                 (unsigned)g_frames_in, (unsigned)g_frames_out, (unsigned)g_drops_pid,
-                (unsigned)g_drops_len, (unsigned)g_timeouts,
+                (unsigned)g_drops_tcp_len, (unsigned)g_drops_rtu_incomplete, (unsigned)g_timeouts,
                 (unsigned)clients_active, (unsigned)g_clients_connected,
                 (unsigned)g_noslot_events, (unsigned)g_preempt_events); });
       }
@@ -539,7 +540,7 @@ namespace esphome
       if (len < 7)
       {
         ESP_LOGW(TAG, "Received too-short frame (%d bytes)", (int)len);
-        g_drops_len++;
+        g_drops_tcp_len++;
         return;
       }
 
@@ -556,7 +557,7 @@ namespace esphome
       if (modbus_len < 2)
       {
         ESP_LOGW(TAG, "Invalid Modbus length (<2), dropping frame: %u", (unsigned)modbus_len);
-        g_drops_len++;
+        g_drops_tcp_len++;
         return;
       }
       // Hard cap to prevent abuse / oversized frames
@@ -564,7 +565,7 @@ namespace esphome
       {
         ESP_LOGW(TAG, "Modbus length too large (%u > %u), dropping frame",
                  (unsigned)modbus_len, (unsigned)MODBUS_TCP_LEN_CAP);
-        g_drops_len++;
+        g_drops_tcp_len++;
         return;
       }
       // Function code must be non-zero (first byte of PDU)
@@ -577,7 +578,7 @@ namespace esphome
       if (modbus_len > this->temp_buffer_.size() - 6)
       {
         ESP_LOGW(TAG, "Invalid Modbus length field: %d (exceeds MAX_TCP_READ)", modbus_len);
-        g_drops_len++;
+        g_drops_tcp_len++;
         return;
       }
       if (len < 6 + modbus_len)
@@ -645,7 +646,274 @@ namespace esphome
       }
     }
 
+    void ModbusBridgeComponent::update_tcp_client_count_()
+    {
+      int cnt = 0;
+#if defined(USE_ESP8266)
+      for (auto &cl : this->clients_)
+        if (cl.socket.connected())
+          ++cnt;
+#elif defined(USE_ESP32)
+      for (auto &cl : this->clients_)
+        if (cl.fd >= 0)
+          ++cnt;
+#endif
+      if (cnt != this->tcp_client_count_)
+      {
+        this->tcp_client_count_ = cnt;
+        this->tcp_clients_changed_cb_.call(cnt);
+      }
+    }
+
+    void ModbusBridgeComponent::handle_new_client_esp8266_(size_t allowed_clients)
+    {
+#if defined(USE_ESP8266)
+      WiFiClient new_client = this->server_.accept();
+      if (!new_client)
+        return;
+
+      // Duplicate connection check: same IP and port
+      bool duplicate = false;
+      for (size_t idx = 0; idx < this->clients_.size(); ++idx)
+      {
+        auto &ex = this->clients_[idx];
+        if (!ex.socket.connected())
+          continue;
+        if (ex.socket.remoteIP() == new_client.remoteIP() && ex.socket.remotePort() == new_client.remotePort())
+        {
+          // Reuse the existing slot: drop old socket, keep the new one
+          size_t slot_idx = idx;
+          ex.socket.stop();
+          this->purge_client_(slot_idx, &this->rx_accu8266_);
+          ex.socket = new_client;
+          ex.socket.setNoDelay(true);
+          ex.socket.setTimeout(10);
+          ex.last_activity = millis();
+          ex.disconnect_notified = false;
+          this->update_tcp_client_count_();
+          duplicate = true;
+          break;
+        }
+      }
+      if (duplicate)
+        return;
+
+      // Ensure accumulator size tracks clients_ size and reserve capacity
+      if (this->rx_accu8266_.size() < this->clients_.size())
+      {
+        this->rx_accu8266_.resize(this->clients_.size());
+        for (auto &v : this->rx_accu8266_)
+          if (v.capacity() < kTcpAccuCap8266)
+            v.reserve(kTcpAccuCap8266);
+      }
+
+      // Try to reuse a free slot (disconnected client)
+      bool placed = false;
+      for (size_t idx = 0; idx < this->clients_.size(); ++idx)
+      {
+        if (!this->clients_[idx].socket.connected())
+        {
+          this->clients_[idx].socket.stop();
+          this->clients_[idx].socket = new_client;
+          this->clients_[idx].socket.setNoDelay(true);
+          this->clients_[idx].socket.setTimeout(10);
+          this->clients_[idx].last_activity = millis();
+          this->rx_accu8266_[idx].clear();
+          this->clients_[idx].disconnect_notified = false;
+          ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d", new_client.remoteIP().toString().c_str(), (unsigned)new_client.remotePort(), (int)idx);
+          g_clients_connected++;
+          this->update_tcp_client_count_();
+          placed = true;
+          break;
+        }
+      }
+
+      // If no free slot, append if under limit
+      if (placed)
+        return;
+      if (this->clients_.size() < allowed_clients)
+      {
+        TCPClient8266 client;
+        client.socket = new_client;
+        client.socket.setNoDelay(true);
+        client.socket.setTimeout(10);
+        client.last_activity = millis();
+        this->clients_.push_back(client);
+        this->rx_accu8266_.emplace_back();
+        if (this->rx_accu8266_.back().capacity() < kTcpAccuCap8266)
+          this->rx_accu8266_.back().reserve(kTcpAccuCap8266);
+        this->clients_.back().disconnect_notified = false;
+        ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d", new_client.remoteIP().toString().c_str(), (unsigned)new_client.remotePort(), (int)(this->clients_.size() - 1));
+        g_clients_connected++;
+        this->update_tcp_client_count_();
+        return;
+      }
+
+      bool preempted = false;
+      if (kPreemptSameIP)
+      {
+        // Find oldest active slot with same IP
+        size_t victim = SIZE_MAX;
+        uint32_t oldest = 0xFFFFFFFFUL;
+        for (size_t i = 0; i < allowed_clients && i < this->clients_.size(); ++i)
+        {
+          auto &cl = this->clients_[i];
+          if (!cl.socket.connected())
+            continue;
+          if (cl.socket.remoteIP() == new_client.remoteIP())
+          {
+            if (victim == SIZE_MAX || cl.last_activity < oldest)
+            {
+              victim = i;
+              oldest = cl.last_activity;
+            }
+          }
+        }
+        if (victim != SIZE_MAX)
+        {
+          // Close victim and install new client; purge its pending requests
+          this->clients_[victim].socket.stop();
+          this->purge_client_(victim, &this->rx_accu8266_);
+          this->clients_[victim].socket = new_client;
+          this->clients_[victim].socket.setNoDelay(true);
+          this->clients_[victim].socket.setTimeout(10);
+          this->clients_[victim].last_activity = millis();
+          this->clients_[victim].disconnect_notified = false;
+          INC(g_preempt_events);
+          INC(g_clients_connected);
+          this->update_tcp_client_count_();
+          preempted = true;
+        }
+      }
+      if (!preempted)
+      {
+        INC(g_noslot_events);
+        new_client.stop();
+      }
+#else
+      (void)allowed_clients;
+#endif
+    }
+
+    void ModbusBridgeComponent::handle_new_client_esp32_(size_t allowed_clients)
+    {
+#if defined(USE_ESP32)
+      struct sockaddr_in client_addr;
+      socklen_t addr_len = sizeof(client_addr);
+      int newfd = accept(this->sock_, (struct sockaddr *)&client_addr, &addr_len);
+      if (newfd < 0)
+        return;
+
+      char client_ip[INET_ADDRSTRLEN];
+      inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+      if (this->debug_)
+        ESP_LOGD(TAG, "TCP accept %s:%d", client_ip, ntohs(client_addr.sin_port));
+
+      // Check for duplicates: same IP and port
+      bool duplicate = false;
+      for (auto &c : this->clients_)
+      {
+        if (c.fd < 0)
+          continue;
+
+        struct sockaddr_in existing_addr;
+        socklen_t len = sizeof(existing_addr);
+        if (getpeername(c.fd, (struct sockaddr *)&existing_addr, &len) == 0)
+        {
+          if (existing_addr.sin_addr.s_addr == client_addr.sin_addr.s_addr &&
+              existing_addr.sin_port == client_addr.sin_port)
+          {
+            // Reuse the existing slot: replace old fd with new one
+            size_t idx = static_cast<size_t>(&c - &this->clients_[0]);
+            this->purge_client_(idx, &this->rx_accu_);
+            close(c.fd);
+            c.fd = newfd;
+            c.last_activity = millis();
+            this->update_tcp_client_count_();
+            duplicate = true;
+            break;
+          }
+        }
+      }
+
+      configure_tcp_client_socket_(newfd);
+      if (duplicate)
+        return;
+
+      bool accepted = false;
+      for (size_t idx = 0; idx < allowed_clients; ++idx)
+      {
+        auto &c = this->clients_[idx];
+        if (c.fd < 0)
+        {
+          c.fd = newfd;
+          c.last_activity = millis();
+          ESP_LOGI(TAG, "TCP connect %s:%d client_id=%zu", client_ip, ntohs(client_addr.sin_port), idx);
+          g_clients_connected++;
+          this->update_tcp_client_count_();
+          accepted = true;
+          break;
+        }
+      }
+      if (accepted)
+        return;
+
+      bool preempted = false;
+      if (kPreemptSameIP)
+      {
+        size_t victim = SIZE_MAX;
+        uint32_t oldest = 0xFFFFFFFFUL;
+        for (size_t i = 0; i < allowed_clients; ++i)
+        {
+          auto &c = this->clients_[i];
+          if (c.fd < 0)
+            continue;
+          struct sockaddr_in ex;
+          socklen_t l = sizeof(ex);
+          if (getpeername(c.fd, (struct sockaddr *)&ex, &l) == 0)
+          {
+            if (ex.sin_addr.s_addr == client_addr.sin_addr.s_addr)
+            {
+              if (victim == SIZE_MAX || c.last_activity < oldest)
+              {
+                victim = i;
+                oldest = c.last_activity;
+              }
+            }
+          }
+        }
+        if (victim != SIZE_MAX)
+        {
+          this->purge_client_(victim, &this->rx_accu_);
+          close(this->clients_[victim].fd);
+          this->clients_[victim].fd = newfd;
+          this->clients_[victim].last_activity = millis();
+          INC(g_preempt_events);
+          INC(g_clients_connected);
+          this->update_tcp_client_count_();
+          preempted = true;
+        }
+      }
+      if (!preempted)
+      {
+        INC(g_noslot_events);
+        close(newfd);
+      }
+#else
+      (void)allowed_clients;
+#endif
+    }
+
     void ModbusBridgeComponent::check_tcp_sockets_()
+    {
+#if defined(USE_ESP8266)
+      this->check_tcp_sockets_esp8266_();
+#elif defined(USE_ESP32)
+      this->check_tcp_sockets_esp32_();
+#endif
+    }
+
+    void ModbusBridgeComponent::check_tcp_sockets_esp8266_()
     {
 #if defined(USE_ESP8266)
       // Per-instance RX accumulator
@@ -660,147 +928,8 @@ namespace esphome
         for (auto &v : this->rx_accu8266_)
           v.clear();
       }
-      auto update_tcp_client_count = [this]()
-      {
-        int cnt = 0;
-        for (auto &cl : this->clients_)
-          if (cl.socket.connected())
-            ++cnt;
-        if (cnt != this->tcp_client_count_)
-        {
-          this->tcp_client_count_ = cnt;
-          this->tcp_clients_changed_cb_.call(cnt);
-        }
-      };
-      WiFiClient new_client = this->server_.accept();
       const size_t allowed_clients = this->tcp_allowed_clients_;
-      if (new_client)
-      {
-        // Duplicate connection check: same IP and port
-        bool duplicate = false;
-        for (size_t idx = 0; idx < this->clients_.size(); ++idx)
-        {
-          auto &ex = this->clients_[idx];
-          if (!ex.socket.connected())
-            continue;
-          if (ex.socket.remoteIP() == new_client.remoteIP() && ex.socket.remotePort() == new_client.remotePort())
-          {
-            // Reuse the existing slot: drop old socket, keep the new one
-            size_t slot_idx = idx;
-            ex.socket.stop();
-            this->purge_client_(slot_idx, &this->rx_accu8266_);
-            ex.socket = new_client;
-            ex.socket.setNoDelay(true);
-            ex.socket.setTimeout(10);
-            ex.last_activity = millis();
-            ex.disconnect_notified = false;
-            update_tcp_client_count();
-            duplicate = true;
-            break;
-          }
-        }
-        if (duplicate)
-        {
-          // new_client now installed in the slot; skip further processing
-        }
-        else
-        {
-          // Ensure accumulator size tracks clients_ size and reserve capacity
-          if (this->rx_accu8266_.size() < this->clients_.size())
-          {
-            this->rx_accu8266_.resize(this->clients_.size());
-            for (auto &v : this->rx_accu8266_)
-              if (v.capacity() < kTcpAccuCap8266)
-                v.reserve(kTcpAccuCap8266);
-          }
-
-          // Try to reuse a free slot (disconnected client)
-          bool placed = false;
-          for (size_t idx = 0; idx < this->clients_.size(); ++idx)
-          {
-            if (!this->clients_[idx].socket.connected())
-            {
-              this->clients_[idx].socket.stop();
-              this->clients_[idx].socket = new_client;
-              this->clients_[idx].socket.setNoDelay(true);
-              this->clients_[idx].socket.setTimeout(10);
-              this->clients_[idx].last_activity = millis();
-              this->rx_accu8266_[idx].clear();
-              this->clients_[idx].disconnect_notified = false;
-              ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d", new_client.remoteIP().toString().c_str(), (unsigned)new_client.remotePort(), (int)idx);
-              g_clients_connected++;
-              update_tcp_client_count();
-              placed = true;
-              break;
-            }
-          }
-          // If no free slot, append if under limit
-          if (!placed)
-          {
-            if (this->clients_.size() < allowed_clients)
-            {
-              TCPClient8266 client;
-              client.socket = new_client;
-              client.socket.setNoDelay(true);
-              client.socket.setTimeout(10);
-              client.last_activity = millis();
-              this->clients_.push_back(client);
-              this->rx_accu8266_.emplace_back();
-              if (this->rx_accu8266_.back().capacity() < kTcpAccuCap8266)
-                this->rx_accu8266_.back().reserve(kTcpAccuCap8266);
-              this->clients_.back().disconnect_notified = false;
-              ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d", new_client.remoteIP().toString().c_str(), (unsigned)new_client.remotePort(), (int)(this->clients_.size() - 1));
-              g_clients_connected++;
-              update_tcp_client_count();
-            }
-            else
-            {
-              bool preempted = false;
-              if (kPreemptSameIP)
-              {
-                // find oldest active slot with same IP
-                size_t victim = SIZE_MAX;
-                uint32_t oldest = 0xFFFFFFFFUL;
-                for (size_t i = 0; i < allowed_clients && i < this->clients_.size(); ++i)
-                {
-                  auto &cl = this->clients_[i];
-                  if (!cl.socket.connected())
-                    continue;
-                  if (cl.socket.remoteIP() == new_client.remoteIP())
-                  {
-                    if (victim == SIZE_MAX || cl.last_activity < oldest)
-                    {
-                      victim = i;
-                      oldest = cl.last_activity;
-                    }
-                  }
-                }
-                if (victim != SIZE_MAX)
-                {
-                  // close victim and install new client; purge its pending requests
-                  this->clients_[victim].socket.stop();
-                  this->purge_client_(victim, &this->rx_accu8266_);
-                  this->clients_[victim].socket = new_client;
-                  this->clients_[victim].socket.setNoDelay(true);
-                  this->clients_[victim].socket.setTimeout(10);
-                  this->clients_[victim].last_activity = millis();
-                  this->clients_[victim].disconnect_notified = false;
-                  INC(g_preempt_events);
-                  INC(g_clients_connected);
-                  update_tcp_client_count();
-                  // ESP_LOGI(TAG, "TCP preempt same-ip client_id=%u", (unsigned)victim);
-                  preempted = true;
-                }
-              }
-              if (!preempted)
-              {
-                INC(g_noslot_events);
-                new_client.stop();
-              }
-            }
-          }
-        } // end duplicate check else
-      }
+      this->handle_new_client_esp8266_(allowed_clients);
 
       for (auto it = this->clients_.begin(); it != this->clients_.end();)
       {
@@ -815,7 +944,7 @@ namespace esphome
           }
           it->socket.stop();
           this->purge_client_(idx, &this->rx_accu8266_);
-          update_tcp_client_count();
+          this->update_tcp_client_count_();
           ++it;
           continue;
         }
@@ -827,7 +956,7 @@ namespace esphome
           it->socket.stop();
           it->disconnect_notified = true;
           this->purge_client_(idx, &this->rx_accu8266_);
-          update_tcp_client_count();
+          this->update_tcp_client_count_();
           ++it;
           continue;
         }
@@ -856,7 +985,12 @@ namespace esphome
 
         ++it;
       }
-#elif defined(USE_ESP32)
+#endif
+    }
+
+    void ModbusBridgeComponent::check_tcp_sockets_esp32_()
+    {
+#if defined(USE_ESP32)
       // Per-instance RX accumulator
       if (!this->enabled_)
       {
@@ -874,19 +1008,6 @@ namespace esphome
           v.clear();
         return; // keep accepting/reading even when requests are pending
       }
-
-      auto update_tcp_client_count = [this]()
-      {
-        int cnt = 0;
-        for (auto &cl : this->clients_)
-          if (cl.fd >= 0)
-            ++cnt;
-        if (cnt != this->tcp_client_count_)
-        {
-          this->tcp_client_count_ = cnt;
-          this->tcp_clients_changed_cb_.call(cnt);
-        }
-      };
 
       const size_t allowed_clients = this->tcp_allowed_clients_;
 
@@ -908,7 +1029,7 @@ namespace esphome
               this->rx_accu_[idx].clear();
             close(c.fd);
             c.fd = -1;
-            update_tcp_client_count();
+            this->update_tcp_client_count_();
           }
           continue;
         }
@@ -920,7 +1041,7 @@ namespace esphome
             this->purge_client_(idx, &this->rx_accu_);
             close(c.fd);
             c.fd = -1;
-            update_tcp_client_count();
+            this->update_tcp_client_count_();
             continue;
           }
           FD_SET(c.fd, &read_fds);
@@ -936,115 +1057,7 @@ namespace esphome
         return;
 
       if (FD_ISSET(this->sock_, &read_fds))
-      {
-        struct sockaddr_in client_addr;
-        socklen_t addr_len = sizeof(client_addr);
-        int newfd = accept(this->sock_, (struct sockaddr *)&client_addr, &addr_len);
-        if (newfd >= 0)
-        {
-          char client_ip[INET_ADDRSTRLEN];
-          inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-          if (this->debug_)
-            ESP_LOGD(TAG, "TCP accept %s:%d", client_ip, ntohs(client_addr.sin_port));
-
-          // Check for duplicates: same IP and port
-          bool duplicate = false;
-          for (auto &c : this->clients_)
-          {
-            if (c.fd < 0)
-              continue;
-
-            struct sockaddr_in existing_addr;
-            socklen_t len = sizeof(existing_addr);
-            if (getpeername(c.fd, (struct sockaddr *)&existing_addr, &len) == 0)
-            {
-              if (existing_addr.sin_addr.s_addr == client_addr.sin_addr.s_addr &&
-                  existing_addr.sin_port == client_addr.sin_port)
-              {
-                // Reuse the existing slot: replace old fd with new one
-                size_t idx = static_cast<size_t>(&c - &this->clients_[0]);
-                this->purge_client_(idx, &this->rx_accu_);
-                close(c.fd);
-                c.fd = newfd;
-                c.last_activity = millis();
-                update_tcp_client_count();
-                duplicate = true;
-                break;
-              }
-            }
-          }
-          if (duplicate)
-          {
-            // We already replaced an existing slot's fd with newfd. Ensure non-blocking and options on the new fd.
-            configure_tcp_client_socket_(newfd);
-            // Do not run the normal accept path; skip to read loop this tick
-          }
-          else
-          {
-            configure_tcp_client_socket_(newfd);
-            bool accepted = false;
-            for (size_t idx = 0; idx < allowed_clients; ++idx)
-            {
-              auto &c = this->clients_[idx];
-              if (c.fd < 0)
-              {
-                c.fd = newfd;
-                c.last_activity = millis();
-                ESP_LOGI(TAG, "TCP connect %s:%d client_id=%zu", client_ip, ntohs(client_addr.sin_port), idx);
-                g_clients_connected++;
-                update_tcp_client_count();
-                accepted = true;
-                break;
-              }
-            }
-            if (!accepted)
-            {
-              bool preempted = false;
-              if (kPreemptSameIP)
-              {
-                size_t victim = SIZE_MAX;
-                uint32_t oldest = 0xFFFFFFFFUL;
-                for (size_t i = 0; i < allowed_clients; ++i)
-                {
-                  auto &c = this->clients_[i];
-                  if (c.fd < 0)
-                    continue;
-                  struct sockaddr_in ex;
-                  socklen_t l = sizeof(ex);
-                  if (getpeername(c.fd, (struct sockaddr *)&ex, &l) == 0)
-                  {
-                    if (ex.sin_addr.s_addr == client_addr.sin_addr.s_addr)
-                    {
-                      if (victim == SIZE_MAX || c.last_activity < oldest)
-                      {
-                        victim = i;
-                        oldest = c.last_activity;
-                      }
-                    }
-                  }
-                }
-                if (victim != SIZE_MAX)
-                {
-                  this->purge_client_(victim, &this->rx_accu_);
-                  close(this->clients_[victim].fd);
-                  this->clients_[victim].fd = newfd;
-                  this->clients_[victim].last_activity = millis();
-                  INC(g_preempt_events);
-                  INC(g_clients_connected);
-                  update_tcp_client_count();
-                  // no per-event log
-                  preempted = true;
-                }
-              }
-              if (!preempted)
-              {
-                INC(g_noslot_events);
-                close(newfd);
-              }
-            }
-          }
-        }
-      }
+        this->handle_new_client_esp32_(allowed_clients);
 
       for (size_t i = 0; i < allowed_clients; ++i)
       {
@@ -1058,7 +1071,7 @@ namespace esphome
             this->purge_client_(i, &this->rx_accu_);
             close(c.fd);
             c.fd = -1;
-            update_tcp_client_count();
+            this->update_tcp_client_count_();
             continue;
           }
           if (r < 0)
@@ -1069,7 +1082,7 @@ namespace esphome
               this->purge_client_(i, &this->rx_accu_);
               close(c.fd);
               c.fd = -1;
-              update_tcp_client_count();
+              this->update_tcp_client_count_();
             }
             continue;
           }
@@ -1092,6 +1105,83 @@ namespace esphome
         }
       }
 #endif
+    }
+
+    bool ModbusBridgeComponent::is_client_slot_connected_(int slot) const
+    {
+      if (slot < 0 || slot >= (int)this->clients_.size())
+        return false;
+#if defined(USE_ESP8266)
+      return this->clients_[slot].socket.connected();
+#elif defined(USE_ESP32)
+      return this->clients_[slot].fd >= 0;
+#else
+      return false;
+#endif
+    }
+
+    void ModbusBridgeComponent::send_rtu_request_(PendingRequest &req)
+    {
+      this->uart_->flush();
+      drain_uart_rx(this->uart_);
+      this->rs485_begin_tx_();
+      this->uart_->write_array(req.rtu_data);
+      this->uart_->flush();
+      this->rs485_end_tx_();
+      req.start_time = millis();
+
+      if (this->debug_)
+      {
+        ESP_LOGD(TAG, "RTU send: %s client_id=%d", to_hex(req.rtu_data).c_str(), req.client_fd);
+      }
+
+      uint8_t fc = pdu_fc_from_rtu_(req.rtu_data);
+      uint16_t addr = start_addr_from_rtu_(req.rtu_data);
+      this->command_sent_cb_.call((int)fc, (int)addr);
+    }
+
+    bool ModbusBridgeComponent::finish_current_and_send_next_()
+    {
+      if (!this->pending_requests_.empty())
+        this->pending_requests_.pop_front();
+
+      while (!this->pending_requests_.empty())
+      {
+        auto &next = this->pending_requests_.front();
+        if (!this->is_client_slot_connected_(next.client_fd))
+        {
+          this->pending_requests_.pop_front();
+          continue;
+        }
+        this->send_rtu_request_(next);
+        return true;
+      }
+
+      this->stop_uart_polling_();
+      return false;
+    }
+
+    void ModbusBridgeComponent::fire_rtu_timeout_for_request_(const PendingRequest &req)
+    {
+      uint8_t fc = pdu_fc_from_rtu_(req.rtu_data);
+      uint16_t addr = start_addr_from_rtu_(req.rtu_data);
+      this->rtu_timeout_cb_.call((int)fc, (int)addr);
+    }
+
+    void ModbusBridgeComponent::read_uart_response_bytes_(PendingRequest &req)
+    {
+      size_t avail = this->uart_->available();
+      if (!avail)
+        return;
+      req.response.reserve(req.response.size() + avail);
+      for (size_t i = 0; i < avail; ++i)
+      {
+        uint8_t b;
+        if (this->uart_->read_byte(&b))
+          req.response.push_back(b);
+        else
+          break;
+      }
     }
 
     void ModbusBridgeComponent::start_uart_polling_()
@@ -1120,70 +1210,7 @@ namespace esphome
       }
       PendingRequest &pending = this->pending_requests_.front();
 
-      // Helper: on timeout, emit RTU-timeout (request context)
-      auto fire_rtu_timeout = [&]()
-      {
-        uint8_t fc = pdu_fc_from_rtu_(pending.rtu_data);
-        uint16_t addr = start_addr_from_rtu_(pending.rtu_data);
-        this->rtu_timeout_cb_.call((int)fc, (int)addr);
-      };
-
-      auto finish_request = [&]()
-      {
-        if (!this->pending_requests_.empty())
-          this->pending_requests_.pop_front();
-        // Find the next valid request whose client is still connected
-        while (!this->pending_requests_.empty())
-        {
-          auto &next = this->pending_requests_.front();
-          bool client_ok = false;
-#if defined(USE_ESP8266)
-          client_ok = next.client_fd >= 0 && next.client_fd < (int)this->clients_.size() && this->clients_[next.client_fd].socket.connected();
-#elif defined(USE_ESP32)
-          client_ok = next.client_fd >= 0 && next.client_fd < (int)this->clients_.size() && this->clients_[next.client_fd].fd >= 0;
-#endif
-          if (!client_ok)
-          {
-            this->pending_requests_.pop_front();
-            continue;
-          }
-          this->uart_->flush();
-          drain_uart_rx(this->uart_);
-          this->rs485_begin_tx_();
-          this->uart_->write_array(next.rtu_data);
-          this->uart_->flush();
-          this->rs485_end_tx_();
-          next.start_time = millis();
-          if (this->debug_)
-          {
-            ESP_LOGD(TAG, "RTU send: %s client_id=%d", to_hex(next.rtu_data).c_str(), next.client_fd);
-          }
-          // Fire command-sent trigger for the next queued request
-          {
-            uint8_t fc2 = pdu_fc_from_rtu_(next.rtu_data);
-            uint16_t addr2 = start_addr_from_rtu_(next.rtu_data);
-            this->command_sent_cb_.call((int)fc2, (int)addr2); // Bridge-global event: command sent (next queued)
-          }
-          return; // keep polling_active_ true
-        }
-        // No valid requests remain
-        this->stop_uart_polling_();
-      };
-
-      size_t avail = this->uart_->available();
-      if (avail)
-      {
-        pending.response.reserve(pending.response.size() + avail);
-        for (size_t i = 0; i < avail; ++i)
-        {
-          uint8_t b;
-          if (this->uart_->read_byte(&b))
-            pending.response.push_back(b);
-          else
-            break;
-        }
-        // last_change no longer used for end-of-frame detection (size-stability is used instead)
-      }
+      this->read_uart_response_bytes_(pending);
 
       size_t current_size = pending.response.size();
 
@@ -1194,8 +1221,8 @@ namespace esphome
         {
           g_timeouts++;
           ESP_LOGW(TAG, "Modbus timeout: no response received (no first byte) client_id=%d", pending.client_fd);
-          fire_rtu_timeout();
-          finish_request();
+          this->fire_rtu_timeout_for_request_(pending);
+          this->finish_current_and_send_next_();
           return;
         }
         return; // still within overall timeout
@@ -1224,7 +1251,7 @@ namespace esphome
         if (current_size < 3)
         {
           ESP_LOGW(TAG, "Invalid RTU response (<3 bytes) – dropping");
-          finish_request();
+          this->finish_current_and_send_next_();
           return;
         }
         // Bridge-global event: RTU frame received (request context)
@@ -1243,7 +1270,7 @@ namespace esphome
         }
         this->send_to_client_(pending.client_fd, tcp_response.data(), tcp_response.size());
         g_frames_out++;
-        finish_request();
+        this->finish_current_and_send_next_();
         return;
       }
 
@@ -1251,9 +1278,9 @@ namespace esphome
       {
         g_timeouts++;
         ESP_LOGW(TAG, "Modbus timeout: response incomplete. Dropping. client_id=%d", pending.client_fd);
-        INC(g_drops_len);
-        fire_rtu_timeout();
-        finish_request();
+        INC(g_drops_rtu_incomplete);
+        this->fire_rtu_timeout_for_request_(pending);
+        this->finish_current_and_send_next_();
         return;
       }
 
@@ -1307,7 +1334,8 @@ namespace esphome
     uint32_t ModbusBridgeComponent::get_frames_in() const { return g_frames_in; }
     uint32_t ModbusBridgeComponent::get_frames_out() const { return g_frames_out; }
     uint32_t ModbusBridgeComponent::get_drops_pid() const { return g_drops_pid; }
-    uint32_t ModbusBridgeComponent::get_drops_len() const { return g_drops_len; }
+    uint32_t ModbusBridgeComponent::get_drops_tcp_len() const { return g_drops_tcp_len; }
+    uint32_t ModbusBridgeComponent::get_drops_rtu_incomplete() const { return g_drops_rtu_incomplete; }
     uint32_t ModbusBridgeComponent::get_timeouts() const { return g_timeouts; }
     uint32_t ModbusBridgeComponent::get_clients_connected_total() const { return g_clients_connected; }
     uint32_t ModbusBridgeComponent::get_noslot_events() const { return g_noslot_events; }
