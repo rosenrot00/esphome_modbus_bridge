@@ -164,7 +164,7 @@ modbus_bridge:
   id: mb_bridge
   uart_id: uart_bus
   tcp_port: 502                  # TCP port to listen on
-  # rtu_response_timeout: 100    # ms, internally clamped to >=10 ms
+  #rtu_response_timeout: 100      # ms, internally clamped to >=10 ms
   # tcp_client_timeout: 60000    # ms of inactivity before client is disconnected
   # tcp_allowed_clients: 2       # number of simultaneous TCP clients (min 1)
   # tcp_poll_interval: 50        # ms between TCP polls
