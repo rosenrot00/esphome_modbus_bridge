@@ -81,7 +81,8 @@ namespace esphome
       uint32_t get_frames_in() const;
       uint32_t get_frames_out() const;
       uint32_t get_drops_pid() const;
-      uint32_t get_drops_len() const;
+      uint32_t get_drops_tcp_len() const;
+      uint32_t get_drops_rtu_incomplete() const;
       uint32_t get_timeouts() const;
       uint32_t get_clients_connected_total() const;
       uint32_t get_noslot_events() const;
@@ -155,7 +156,17 @@ namespace esphome
       void initialize_tcp_server_();
       void poll_uart_response_();
       void check_tcp_sockets_();
+      void check_tcp_sockets_esp8266_();
+      void check_tcp_sockets_esp32_();
+      void update_tcp_client_count_();
+      void handle_new_client_esp8266_(size_t allowed_clients);
+      void handle_new_client_esp32_(size_t allowed_clients);
       void shutdown_tcp_and_pending_();
+      bool is_client_slot_connected_(int slot) const;
+      void send_rtu_request_(PendingRequest &req);
+      bool finish_current_and_send_next_();
+      void fire_rtu_timeout_for_request_(const PendingRequest &req);
+      void read_uart_response_bytes_(PendingRequest &req);
       void handle_tcp_payload(const uint8_t *data, size_t len, int client_fd);
       void send_to_client_(int slot, const uint8_t *data, size_t len);
       void purge_client_(size_t idx, std::vector<std::vector<uint8_t>> *accu_opt);
