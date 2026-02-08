@@ -4,6 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge for ESP82
 
 | Version | Changes |
 |---|---|
+| 2026.02.2 | Removed duplicate YAML event `on_command_sent` (use `on_rtu_send`), validated `rtu_response_timeout` with min 10 ms |
 | 2026.02.1 | UART polling lifecycle fixed, RTU timeout is now direct (default 100 ms), TCP parsing optimized, and LEN drops split into TCP/RTU counters |
 | 2026.01.2 | Added separate RS-485 `de_pin` and `re_pin`; removed `flow_control_pin` |
 | 2026.01.1 | TCP client drops, RTU timeouts, and others are now available to use as HA sensors |
