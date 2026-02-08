@@ -4,7 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge for ESP82
 
 | Version | Changes |
 |---|---|
-| 2026.02.1 | UART polling lifecycle fixed, RTU timeout is now direct (default 100 ms), and TCP frame parsing was optimized |
+| 2026.02.1 | UART polling lifecycle fixed, RTU timeout is now direct (default 100 ms), TCP parsing optimized, and LEN drops split into TCP/RTU counters |
 | 2026.01.2 | Added separate RS-485 `de_pin` and `re_pin`; removed `flow_control_pin` |
 | 2026.01.1 | TCP client drops, RTU timeouts, and others are now available to use as HA sensors |
 | 2025.12.3 | Added `uart_wake_loop_on_rx` to enable ESPHome’s low-latency UART flag |
@@ -164,7 +164,7 @@ modbus_bridge:
   id: mb_bridge
   uart_id: uart_bus
   tcp_port: 502                  # TCP port to listen on
-  # rtu_response_timeout: 100    # ms, internally clamped to >=10 ms
+  # rtu_response_timeout: 100     # ms, internally clamped to >=10 ms
   # tcp_client_timeout: 60000    # ms of inactivity before client is disconnected
   # tcp_allowed_clients: 2       # number of simultaneous TCP clients (min 1)
   # tcp_poll_interval: 50        # ms between TCP polls
@@ -173,7 +173,7 @@ modbus_bridge:
   # (DE and /RE may be the same GPIO if the transceiver ties them together)
   # crc_bytes_swapped: false     # allows to swap CRC byte order LO/HI -> HI/LO
   # enabled: true                # allows to enable or disable during runtime
-  # uart_wake_loop_on_rx: true   # enable ESPHome's UART low latency setting (effects not yet tested)
+  # uart_wake_loop_on_rx: false  # default false; set true to enable ESPHome's UART low-latency RX wake
 
   # Event: triggered whenever number of TCP clients changes
   on_tcp_clients_changed:
@@ -288,11 +288,18 @@ sensor:
       return (int) id(mb_bridge).get_drops_pid();
 
   - platform: template
-    name: "Drops LEN"
+    name: "TCP Drops LEN"
     accuracy_decimals: 0
     update_interval: 10s
     lambda: |-
-      return (int) id(mb_bridge).get_drops_len();
+      return (int) id(mb_bridge).get_drops_tcp_len();
+
+  - platform: template
+    name: "RTU Incomplete Drops"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      return (int) id(mb_bridge).get_drops_rtu_incomplete();
 
   - platform: template
     name: "RTU Timeouts"
