@@ -23,7 +23,6 @@ namespace esphome
     {
       WiFiClient socket;
       uint32_t last_activity = 0;
-      int id = -1;                      // slot index used as client_id
       bool disconnect_notified = false; // suppress repeated disconnect logs
     };
 #endif
@@ -121,7 +120,7 @@ namespace esphome
       uint32_t rtu_poll_interval_ms_{10};
       uint32_t tcp_client_timeout_ms_{60000};
       uint32_t rtu_inactivity_timeout_ms_{20};
-      uint32_t rtu_response_timeout_ms_{3000};
+      uint32_t rtu_response_timeout_ms_{100};
       std::vector<uint8_t> temp_buffer_;
       uint8_t tcp_allowed_clients_{2};
       bool crc_bytes_swapped_{false};
@@ -129,8 +128,7 @@ namespace esphome
 
       bool polling_active_{false};
 
-      // NEW – cached timing for RS-485 toggling
-      uint32_t baud_cache_{0};
+      // Cached timing for RS-485 toggling
       uint32_t char_time_us_{0};
 
       // Optional RS-485 DE and /RE pins
@@ -152,10 +150,12 @@ namespace esphome
       // Bridge-wide online/offline state and counters
 
       void start_uart_polling_();
+      void stop_uart_polling_();
       void append_crc(std::vector<uint8_t> &data);
       void initialize_tcp_server_();
       void poll_uart_response_();
       void check_tcp_sockets_();
+      void shutdown_tcp_and_pending_();
       void handle_tcp_payload(const uint8_t *data, size_t len, int client_fd);
       void send_to_client_(int slot, const uint8_t *data, size_t len);
       void purge_client_(size_t idx, std::vector<std::vector<uint8_t>> *accu_opt);
