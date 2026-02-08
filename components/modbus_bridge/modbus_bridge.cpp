@@ -17,8 +17,6 @@
 
 #include "modbus_bridge.h"
 #include "esphome/core/log.h"
-#include "esphome/core/helpers.h"
-#include "esphome/core/application.h"
 #include "esphome/core/hal.h"
 #include "esphome/components/network/util.h"
 
@@ -189,32 +187,67 @@ namespace esphome
 #endif
     }
 
+#if defined(USE_ESP32)
+    static inline void configure_tcp_client_socket_(int fd)
+    {
+      if (fd < 0)
+        return;
+      fcntl(fd, F_SETFL, O_NONBLOCK);
+      int one = 1;
+      setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+      int ka = 1;
+      setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
+#ifdef TCP_KEEPIDLE
+      int idle = 30;
+      setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+#endif
+#ifdef TCP_KEEPINTVL
+      int intvl = 10;
+      setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+#endif
+#ifdef TCP_KEEPCNT
+      int cnt = 3;
+      setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+#endif
+    }
+#endif
+
     // Extract and process as many complete Modbus-TCP frames as possible from an accumulator
     static inline void process_accu(std::vector<uint8_t> &accu, int client_slot, const FrameHandler &on_frame)
     {
       int processed = 0;
+      size_t offset = 0;
       // defensive cap for Modbus-TCP LEN (UID+PDU); typical max ~260
-      while (accu.size() >= 7)
+      while (accu.size() >= offset + 7)
       {
         if (processed++ >= (int)kMaxFramesPerLoop)
           break;
-        const uint8_t *buf = accu.data();
+        const uint8_t *buf = accu.data() + offset;
         uint16_t len_field = static_cast<uint16_t>((buf[4] << 8) | buf[5]);
 
         // If LEN is clearly invalid, drop accumulator to recover from poison
         if (len_field < 2 || len_field > MODBUS_TCP_LEN_CAP)
         {
           accu.clear();
-          break;
+          return;
         }
 
         size_t frame_len = 6UL + static_cast<size_t>(len_field); // MBAP(6) + LEN (UID+PDU)
-        if (frame_len > accu.size())
+        if (offset + frame_len > accu.size())
           break; // incomplete; wait for more bytes
 
         on_frame(buf, frame_len, client_slot);
-        accu.erase(accu.begin(), accu.begin() + frame_len);
+        offset += frame_len;
       }
+
+      if (offset == 0)
+        return;
+      if (offset >= accu.size())
+      {
+        accu.clear();
+        return;
+      }
+      accu.erase(accu.begin(), accu.begin() + offset);
     }
 
 // Tiny counter helper
@@ -238,7 +271,7 @@ namespace esphome
           ++it;
       }
       if (this->pending_requests_.empty())
-        this->polling_active_ = false;
+        this->stop_uart_polling_();
     }
 
     // --- Optional RS-485 DE/RE support ------------------------------------------
@@ -308,9 +341,8 @@ namespace esphome
         return;
       }
 
-      // cache baud + char time; setup optional RS-485 pin
-      this->baud_cache_ = _br_setup_guard;
-      this->char_time_us_ = calc_char_time_us_(this->baud_cache_);
+      // Cache char time; setup optional RS-485 pin
+      this->char_time_us_ = calc_char_time_us_(_br_setup_guard);
 
       // Optional RS-485 DE and /RE pins
       // Drive both with the same level so it works if they are separate GPIOs or the same GPIO is used for both.
@@ -341,50 +373,7 @@ namespace esphome
         this->initialize_tcp_server_();
       } else if (this->sock_ >= 0 && !have_ip) {
         ESP_LOGW(TAG, "Lost network IP – closing TCP server");
-
-        // Stop accepting new connections.
-#if defined(USE_ESP8266)
-        this->server_.stop();
-#elif defined(USE_ESP32)
-        close(this->sock_);
-#endif
-        this->sock_ = -1;
-
-#if defined(USE_ESP8266)
-        for (size_t i = 0; i < this->clients_.size(); ++i) {
-          auto &cl = this->clients_[i];
-          if (cl.socket.connected())
-            cl.socket.stop();
-          this->purge_client_(i, &this->rx_accu8266_);
-        }
-#elif defined(USE_ESP32)
-        for (size_t i = 0; i < this->clients_.size(); ++i) {
-          auto &cl = this->clients_[i];
-          this->purge_client_(i, &this->rx_accu_);
-          if (cl.fd >= 0) {
-            close(cl.fd);
-            cl.fd = -1;
-          }
-        }
-#endif
-
-        // Clear any pending Modbus requests and stop UART polling.
-        this->pending_requests_.clear();
-        this->polling_active_ = false;
-        if (this->uart_ != nullptr) {
-          drain_uart_rx(this->uart_);
-        }
-
-        // TCP event: stopped (guarded for idempotency)
-        if (this->tcp_server_running_) {
-          this->tcp_server_running_ = false;
-          this->tcp_stopped_cb_.call();
-        }
-        // Notify clients changed → 0 when server stops
-        if (this->tcp_client_count_ != 0) {
-          this->tcp_client_count_ = 0;
-          this->tcp_clients_changed_cb_.call(0);
-        }
+        this->shutdown_tcp_and_pending_();
       }
       });
 
@@ -397,7 +386,7 @@ namespace esphome
       // One full Modbus-TCP frame (MBAP + LEN)
       this->temp_buffer_.resize(MAX_TCP_READ);
       this->rtu_poll_interval_ms_ = this->rtu_inactivity_timeout_ms_ + 2;
-      this->polling_active_ = false;
+      this->stop_uart_polling_();
 
       // Periodic status log (debug only)
       this->set_interval("status_log", 10000, [this]()
@@ -490,6 +479,55 @@ namespace esphome
 #endif
     }
 
+    void ModbusBridgeComponent::shutdown_tcp_and_pending_()
+    {
+#if defined(USE_ESP8266)
+      if (this->sock_ >= 0)
+        this->server_.stop();
+#elif defined(USE_ESP32)
+      if (this->sock_ >= 0)
+        close(this->sock_);
+#endif
+      this->sock_ = -1;
+
+#if defined(USE_ESP8266)
+      for (size_t i = 0; i < this->clients_.size(); ++i)
+      {
+        auto &cl = this->clients_[i];
+        if (cl.socket.connected())
+          cl.socket.stop();
+        this->purge_client_(i, &this->rx_accu8266_);
+      }
+#elif defined(USE_ESP32)
+      for (size_t i = 0; i < this->clients_.size(); ++i)
+      {
+        auto &cl = this->clients_[i];
+        this->purge_client_(i, &this->rx_accu_);
+        if (cl.fd >= 0)
+        {
+          close(cl.fd);
+          cl.fd = -1;
+        }
+      }
+#endif
+
+      this->pending_requests_.clear();
+      this->stop_uart_polling_();
+      if (this->uart_ != nullptr)
+        drain_uart_rx(this->uart_);
+
+      if (this->tcp_server_running_)
+      {
+        this->tcp_server_running_ = false;
+        this->tcp_stopped_cb_.call();
+      }
+      if (this->tcp_client_count_ != 0)
+      {
+        this->tcp_client_count_ = 0;
+        this->tcp_clients_changed_cb_.call(0);
+      }
+    }
+
     void ModbusBridgeComponent::handle_tcp_payload(const uint8_t *data, size_t len, int client_fd)
     {
       // DoS protection: cap pending requests
@@ -577,7 +615,7 @@ namespace esphome
         size_t rx_cap = this->uart_->get_rx_buffer_size();
         req.response.reserve(std::max<size_t>(rx_cap, 256));
       }
-      req.start_time = millis();
+      req.start_time = 0;
       req.last_size = 0; // ensure deterministic timeout logic
       req.stable_polls = 0;
       g_frames_in++;
@@ -596,6 +634,7 @@ namespace esphome
         this->uart_->write_array(cur.rtu_data);
         this->uart_->flush();
         this->rs485_end_tx_();
+        cur.start_time = millis();
         this->start_uart_polling_();
         // Fire command-sent trigger (bridge-global)
         {
@@ -937,44 +976,12 @@ namespace esphome
           if (duplicate)
           {
             // We already replaced an existing slot's fd with newfd. Ensure non-blocking and options on the new fd.
-            fcntl(newfd, F_SETFL, O_NONBLOCK);
-            int one = 1;
-            setsockopt(newfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-            int ka = 1;
-            setsockopt(newfd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
-#ifdef TCP_KEEPIDLE
-            int idle = 30;
-            setsockopt(newfd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
-#endif
-#ifdef TCP_KEEPINTVL
-            int intvl = 10;
-            setsockopt(newfd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
-#endif
-#ifdef TCP_KEEPCNT
-            int cnt = 3;
-            setsockopt(newfd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
-#endif
+            configure_tcp_client_socket_(newfd);
             // Do not run the normal accept path; skip to read loop this tick
           }
           else
           {
-            fcntl(newfd, F_SETFL, O_NONBLOCK);
-            int one = 1;
-            setsockopt(newfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-            int ka = 1;
-            setsockopt(newfd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
-#ifdef TCP_KEEPIDLE
-            int idle = 30;
-            setsockopt(newfd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
-#endif
-#ifdef TCP_KEEPINTVL
-            int intvl = 10;
-            setsockopt(newfd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
-#endif
-#ifdef TCP_KEEPCNT
-            int cnt = 3;
-            setsockopt(newfd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
-#endif
+            configure_tcp_client_socket_(newfd);
             bool accepted = false;
             for (size_t idx = 0; idx < allowed_clients; ++idx)
             {
@@ -1096,11 +1103,19 @@ namespace esphome
       this->polling_active_ = true;
     }
 
+    void ModbusBridgeComponent::stop_uart_polling_()
+    {
+      if (!this->polling_active_)
+        return;
+      this->cancel_interval("modbus_rx_poll");
+      this->polling_active_ = false;
+    }
+
     void ModbusBridgeComponent::poll_uart_response_()
     {
       if (this->pending_requests_.empty())
       {
-        polling_active_ = false;
+        this->stop_uart_polling_();
         return;
       }
       PendingRequest &pending = this->pending_requests_.front();
@@ -1138,6 +1153,7 @@ namespace esphome
           this->uart_->write_array(next.rtu_data);
           this->uart_->flush();
           this->rs485_end_tx_();
+          next.start_time = millis();
           if (this->debug_)
           {
             ESP_LOGD(TAG, "RTU send: %s client_id=%d", to_hex(next.rtu_data).c_str(), next.client_fd);
@@ -1151,7 +1167,7 @@ namespace esphome
           return; // keep polling_active_ true
         }
         // No valid requests remain
-        this->polling_active_ = false;
+        this->stop_uart_polling_();
       };
 
       size_t avail = this->uart_->available();
@@ -1173,12 +1189,7 @@ namespace esphome
 
       if (current_size == 0)
       {
-        const uint32_t first_byte_grace_ms = 100;
         uint32_t dt = millis() - pending.start_time;
-        if (dt < first_byte_grace_ms)
-        {
-          return; // keep waiting for first byte
-        }
         if (dt > this->rtu_response_timeout_ms_)
         {
           g_timeouts++;
@@ -1187,7 +1198,7 @@ namespace esphome
           finish_request();
           return;
         }
-        return; // grace elapsed but still within overall timeout
+        return; // still within overall timeout
       }
 
       // --- End-of-frame detection by size stability over consecutive polls ---
@@ -1278,61 +1289,7 @@ namespace esphome
 
       if (!enabled)
       {
-        // Stop TCP server if running
-#if defined(USE_ESP8266)
-        if (this->sock_ >= 0)
-        {
-          this->server_.stop();
-        }
-#elif defined(USE_ESP32)
-        if (this->sock_ >= 0)
-        {
-          close(this->sock_);
-        }
-#endif
-        this->sock_ = -1;
-
-        // Stop all clients and clear per-client accumulators
-#if defined(USE_ESP8266)
-        for (size_t i = 0; i < this->clients_.size(); ++i)
-        {
-          auto &cl = this->clients_[i];
-          if (cl.socket.connected())
-            cl.socket.stop();
-          this->purge_client_(i, &this->rx_accu8266_);
-        }
-#elif defined(USE_ESP32)
-        for (size_t i = 0; i < this->clients_.size(); ++i)
-        {
-          auto &cl = this->clients_[i];
-          this->purge_client_(i, &this->rx_accu_);
-          if (cl.fd >= 0)
-          {
-            close(cl.fd);
-            cl.fd = -1;
-          }
-        }
-#endif
-
-        // Reset TCP server state flags and notify listeners
-        if (this->tcp_server_running_)
-        {
-          this->tcp_server_running_ = false;
-          this->tcp_stopped_cb_.call();
-        }
-        if (this->tcp_client_count_ != 0)
-        {
-          this->tcp_client_count_ = 0;
-          this->tcp_clients_changed_cb_.call(0);
-        }
-
-        // Clear pending Modbus requests and stop UART polling
-        this->pending_requests_.clear();
-        this->polling_active_ = false;
-        if (this->uart_ != nullptr)
-        {
-          drain_uart_rx(this->uart_);
-        }
+        this->shutdown_tcp_and_pending_();
       }
       else
       {
