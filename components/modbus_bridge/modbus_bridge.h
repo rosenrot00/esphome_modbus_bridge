@@ -162,7 +162,7 @@ namespace esphome
       void handle_new_client_esp8266_(size_t allowed_clients);
       void handle_new_client_esp32_(size_t allowed_clients);
       void shutdown_tcp_and_pending_();
-      bool is_client_slot_connected_(int slot) const;
+      bool is_client_slot_connected_(int slot);
       void send_rtu_request_(PendingRequest &req);
       bool finish_current_and_send_next_();
       void fire_rtu_timeout_for_request_(const PendingRequest &req);
