@@ -1107,7 +1107,7 @@ namespace esphome
 #endif
     }
 
-    bool ModbusBridgeComponent::is_client_slot_connected_(int slot) const
+    bool ModbusBridgeComponent::is_client_slot_connected_(int slot)
     {
       if (slot < 0 || slot >= (int)this->clients_.size())
         return false;
