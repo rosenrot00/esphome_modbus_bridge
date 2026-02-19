@@ -465,7 +465,8 @@ namespace esphome
       auto ips = network::get_ip_addresses();
       if (!ips.empty())
       {
-        ESP_LOGI(TAG, "TCP server started on %s:%d", ips[0].str().c_str(), this->tcp_port_);
+        char ipbuf[network::IP_ADDRESS_BUFFER_SIZE];
+        ESP_LOGI(TAG, "TCP server started on %s:%d", ips[0].str_to(ipbuf), this->tcp_port_);
       }
       else
       {
