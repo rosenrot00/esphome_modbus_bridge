@@ -4,7 +4,8 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge for ESP82
 
 | Version | Changes |
 |---|---|
-| 2026.02.2 | Removed duplicate YAML event `on_command_sent` (use `on_rtu_send`), validated `rtu_response_timeout` with min 10 ms |
+| 2026.02.3 | Removed deprecated `uart_wake_loop_on_rx`; ESPHome now enables UART wake-on-RX automatically on ESP32 |
+| 2026.02.2 | Removed duplicate YAML event `on_command_sent` (use `on_rtu_send`), validated `rtu_response_timeout` with min 10 ms, and aligned README defaults/comments |
 | 2026.02.1 | UART polling lifecycle fixed, RTU timeout is now direct (default 100 ms), TCP parsing optimized, and LEN drops split into TCP/RTU counters |
 | 2026.01.2 | Added separate RS-485 `de_pin` and `re_pin`; removed `flow_control_pin` |
 | 2026.01.1 | TCP client drops, RTU timeouts, and others are now available to use as HA sensors |
@@ -32,6 +33,8 @@ The bridge listens on a configurable TCP port (default: 502) and expects standar
 - Can run multiple bridges in one node (for multiple UART buses)
 - Auto-recovers after network/IP loss
 - Integrates easily with Home Assistant and ESPHome automations
+
+Runtime counters and the related example sensors are aggregated across all configured `modbus_bridge` instances on the same ESP node. They are intended as node-wide diagnostics, not per-bridge counters.
 
 #### Proven Compatibility
 - [nilan-cts600-homeassistant](https://github.com/frodef/nilan-cts600-homeassistant) thanks to @RichardIstSauer
@@ -174,7 +177,6 @@ modbus_bridge:
   # (DE and /RE may be the same GPIO if the transceiver ties them together)
   # crc_bytes_swapped: false     # allows to swap CRC byte order LO/HI -> HI/LO
   # enabled: true                # allows to enable or disable during runtime
-  # uart_wake_loop_on_rx: false  # default false; set true to enable ESPHome's UART low-latency RX wake
 
   # Event: triggered whenever number of TCP clients changes
   on_tcp_clients_changed:
@@ -261,6 +263,7 @@ switch:
           id(mb_bridge).set_enabled(false);
 
 sensor:
+  # Runtime counters below are node-wide totals across all modbus_bridge instances.
   - platform: template
     name: "TCP Clients"
     id: mb_tcp_clients
