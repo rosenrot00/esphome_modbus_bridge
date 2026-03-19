@@ -93,7 +93,7 @@ namespace esphome
       void set_re_pin(GPIOPin *pin) { re_pin_ = pin; }
 
       // Bridge-global automation adders (events carry function_code and start_address)
-      void add_on_command_sent_callback(std::function<void(int, int)> &&cb) { command_sent_cb_.add(std::move(cb)); }
+      void add_on_rtu_send_callback(std::function<void(int, int)> &&cb) { rtu_send_cb_.add(std::move(cb)); }
       void add_on_rtu_receive_callback(std::function<void(int, int)> &&cb) { rtu_receive_cb_.add(std::move(cb)); }
       void add_on_rtu_timeout_callback(std::function<void(int, int)> &&cb) { rtu_timeout_cb_.add(std::move(cb)); }
 
@@ -137,7 +137,7 @@ namespace esphome
       GPIOPin *re_pin_{nullptr};
 
       // Bridge-global event callbacks
-      esphome::CallbackManager<void(int, int)> command_sent_cb_;
+      esphome::CallbackManager<void(int, int)> rtu_send_cb_;
       esphome::CallbackManager<void(int, int)> rtu_receive_cb_;
       esphome::CallbackManager<void(int, int)> rtu_timeout_cb_;
 
@@ -162,6 +162,10 @@ namespace esphome
       void handle_new_client_esp8266_(size_t allowed_clients);
       void handle_new_client_esp32_(size_t allowed_clients);
       void shutdown_tcp_and_pending_();
+      void record_tcp_client_connected_();
+      void refresh_tcp_client_count_();
+      void prepare_rx_accumulator_(std::vector<std::vector<uint8_t>> &accu, size_t target_size, size_t reserve_cap);
+      void handle_client_rx_chunk_(std::vector<uint8_t> &accu, int client_fd, const uint8_t *data, size_t len, size_t max_accu);
       bool is_client_slot_connected_(int slot);
       void send_rtu_request_(PendingRequest &req);
       bool finish_current_and_send_next_();
