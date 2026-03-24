@@ -4,7 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge for ESP82
 
 | Version | Changes |
 |---|---|
-| 2026.03.2 | If `de_pin` and `re_pin` use the same GPIO, the component now enables shared pin use automatically |
+| 2026.03.2 | Fix `de_pin` and `re_pin` using the same pin |
 | 2026.03.1 | Removed deprecated `uart_wake_loop_on_rx`; ESPHome now enables UART wake-on-RX automatically on ESP32 |
 | 2026.02.2 | Removed duplicate YAML event `on_command_sent` (use `on_rtu_send`), validated `rtu_response_timeout` with min 10 ms, and aligned README defaults/comments |
 | 2026.02.1 | UART polling lifecycle fixed, RTU timeout is now direct (default 100 ms), TCP parsing optimized, and LEN drops split into TCP/RTU counters |
@@ -62,7 +62,7 @@ The following diagram shows how an ESP32 is connected to an RS485 transceiver (e
                                                  A ---------------- B
                                               RS485 differential pair
 ```
-`DE` and `RE` may be wired to the same GPIO if your transceiver ties `DE` and `/RE` together.
+`DE` and `/RE` may use the same GPIO if your RS485 transceiver or module supports a shared direction-control signal.
 
 #### ESPHome Configuration Examples
 
