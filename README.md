@@ -175,7 +175,6 @@ modbus_bridge:
   # tcp_poll_interval: 50        # ms between TCP polls
   # de_pin: GPIO18               # Optional: RS-485 Driver Enable (DE)
   # re_pin: GPIO19               # Optional: RS-485 Receiver Enable (/RE) - de_pin and re_pin can be the same GPIO
-  # (DE and /RE may be the same GPIO if the transceiver ties them together)
   # crc_bytes_swapped: false     # allows to swap CRC byte order LO/HI -> HI/LO
   # enabled: true                # allows to enable or disable during runtime
 
