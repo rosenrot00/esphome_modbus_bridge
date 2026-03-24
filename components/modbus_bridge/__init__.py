@@ -24,7 +24,39 @@ CONF_ON_TCP_CLIENTS_CHANGED = "on_tcp_clients_changed"
 modbus_bridge_ns = cg.esphome_ns.namespace("modbus_bridge")
 ModbusBridgeComponent = modbus_bridge_ns.class_("ModbusBridgeComponent", cg.Component)
 
-BASE_SCHEMA = cv.Schema(
+def _pin_ref(pin_conf):
+    if isinstance(pin_conf, dict):
+        return pin_conf.get("number")
+    return pin_conf
+
+
+def _pin_with_shared_use(pin_conf):
+    if isinstance(pin_conf, dict):
+        pin_conf = dict(pin_conf)
+        pin_conf.setdefault("allow_other_uses", True)
+        return pin_conf
+    return {
+        "number": pin_conf,
+        "allow_other_uses": True,
+    }
+
+
+def _allow_shared_de_re_pin(config):
+    de_pin = config.get(CONF_DE_PIN)
+    re_pin = config.get(CONF_RE_PIN)
+    if de_pin is None or re_pin is None:
+        return config
+    if _pin_ref(de_pin) != _pin_ref(re_pin):
+        return config
+    config = dict(config)
+    config[CONF_DE_PIN] = _pin_with_shared_use(de_pin)
+    config[CONF_RE_PIN] = _pin_with_shared_use(re_pin)
+    return config
+
+
+BASE_SCHEMA = cv.All(
+    _allow_shared_de_re_pin,
+    cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(ModbusBridgeComponent),
         cv.Required("uart_id"): cv.use_id(uart.UARTComponent),
@@ -81,7 +113,8 @@ BASE_SCHEMA = cv.Schema(
             }
         ),
     }
-).extend(cv.COMPONENT_SCHEMA)
+    ).extend(cv.COMPONENT_SCHEMA),
+)
 
 # Allow a list of bridge definitions under modbus_bridge:
 CONFIG_SCHEMA = cv.ensure_list(BASE_SCHEMA)
