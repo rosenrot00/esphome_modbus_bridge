@@ -1266,14 +1266,19 @@ namespace esphome
         return;
       }
 
-      if (millis() - pending.start_time > this->rtu_response_timeout_ms_)
-      {
-        g_timeouts++;
-        ESP_LOGW(TAG, "Modbus timeout: response incomplete. Dropping. client_id=%d", pending.client_fd);
-        INC(g_drops_rtu_incomplete);
-        this->fire_rtu_timeout_for_request_(pending);
-        this->finish_current_and_send_next_();
-        return;
+	      if (millis() - pending.start_time > this->rtu_response_timeout_ms_)
+	      {
+	        g_timeouts++;
+	        if (!pending.response.empty())
+	        {
+	          ESP_LOGW(TAG, "Incomplete RTU response (%d bytes): %s",
+	                   (int) pending.response.size(), to_hex(pending.response).c_str());
+	        }
+	        ESP_LOGW(TAG, "Modbus timeout: response incomplete. Dropping. client_id=%d", pending.client_fd);
+	        INC(g_drops_rtu_incomplete);
+	        this->fire_rtu_timeout_for_request_(pending);
+	        this->finish_current_and_send_next_();
+	        return;
       }
 
       return;
