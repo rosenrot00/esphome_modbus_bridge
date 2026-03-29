@@ -4,10 +4,11 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge for ESP82
 
 | Version | Changes |
 |---|---|
-| 2026.03.2 | Fixed `de_pin` and `re_pin` using the same pin |
+| 2026.03.3 | Increased the default `rtu_response_timeout` from 100 ms to 1000 ms |
+| 2026.03.2 | If `de_pin` and `re_pin` use the same GPIO, the component now enables shared pin use automatically |
 | 2026.03.1 | Removed deprecated `uart_wake_loop_on_rx`; ESPHome now enables UART wake-on-RX automatically on ESP32 |
 | 2026.02.2 | Removed duplicate YAML event `on_command_sent` (use `on_rtu_send`), validated `rtu_response_timeout` with min 10 ms, and aligned README defaults/comments |
-| 2026.02.1 | UART polling lifecycle fixed, RTU timeout is now direct (default 100 ms), TCP parsing optimized, and LEN drops split into TCP/RTU counters |
+| 2026.02.1 | UART polling lifecycle fixed, RTU timeout is now direct, TCP parsing optimized, and LEN drops split into TCP/RTU counters |
 | 2026.01.2 | Added separate RS-485 `de_pin` and `re_pin`; removed `flow_control_pin` |
 | 2026.01.1 | TCP client drops, RTU timeouts, and others are now available to use as HA sensors |
 | 2025.12.3 | Added `uart_wake_loop_on_rx` to enable ESPHome’s low-latency UART flag |
@@ -169,12 +170,13 @@ modbus_bridge:
   id: mb_bridge
   uart_id: uart_bus
   tcp_port: 502                  # TCP port to listen on
-  # rtu_response_timeout: 100     # ms, internally clamped to >=10 ms
+  # rtu_response_timeout: 1000    # ms, internally clamped to >=10 ms
   # tcp_client_timeout: 60000    # ms of inactivity before client is disconnected
   # tcp_allowed_clients: 2       # number of simultaneous TCP clients (min 1)
   # tcp_poll_interval: 50        # ms between TCP polls
   # de_pin: GPIO18               # Optional: RS-485 Driver Enable (DE)
   # re_pin: GPIO19               # Optional: RS-485 Receiver Enable (/RE) - de_pin and re_pin can be the same GPIO
+  # (DE and /RE may be the same GPIO if the transceiver ties them together)
   # crc_bytes_swapped: false     # allows to swap CRC byte order LO/HI -> HI/LO
   # enabled: true                # allows to enable or disable during runtime
 
