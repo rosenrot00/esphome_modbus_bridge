@@ -121,7 +121,7 @@ namespace esphome
       uint32_t rtu_poll_interval_ms_{10};
       uint32_t tcp_client_timeout_ms_{60000};
       uint32_t rtu_inactivity_timeout_ms_{20};
-      uint32_t rtu_response_timeout_ms_{100};
+      uint32_t rtu_response_timeout_ms_{1000};
       std::vector<uint8_t> temp_buffer_;
       uint8_t tcp_allowed_clients_{2};
       bool crc_bytes_swapped_{false};

@@ -65,7 +65,7 @@ BASE_SCHEMA = cv.All(
         cv.Optional(CONF_TCP_PORT, default=502): cv.port,
         cv.Optional(CONF_TCP_POLL_INTERVAL, default=50): cv.positive_int,
         cv.Optional(CONF_TCP_CLIENT_TIMEOUT, default=60000): cv.positive_int,
-        cv.Optional(CONF_RTU_RESPONSE_TIMEOUT, default=100): cv.int_range(min=10),
+        cv.Optional(CONF_RTU_RESPONSE_TIMEOUT, default=1000): cv.int_range(min=10),
         cv.Optional(CONF_TCP_ALLOWED_CLIENTS, default=2): cv.positive_int,
         cv.Optional(CONF_CRC_BYTES_SWAPPED, default=False): cv.boolean,
         cv.Optional(CONF_ENABLED, default=True): cv.boolean,
