@@ -345,6 +345,27 @@ sensor:
       return (int) id(mb_bridge).get_drops_rtu_incomplete();
 
   - platform: template
+    name: "Untrusted Read Drops"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      return (int) id(mb_bridge).get_drop_untrusted_reads();
+
+  - platform: template
+    name: "Untrusted Write Blocks"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      return (int) id(mb_bridge).get_block_untrusted_writes();
+
+  - platform: template
+    name: "Untrusted Client Rejects"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      return (int) id(mb_bridge).get_reject_untrusted_clients();
+
+  - platform: template
     name: "RTU Timeouts"
     accuracy_decimals: 0
     update_interval: 10s
