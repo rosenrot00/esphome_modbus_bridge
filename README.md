@@ -4,8 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge for ESP82
 
 | Version | Changes |
 |---|---|
-| 2026.04.3 | Added optional rejection of untrusted TCP clients before they can use the bridge |
-| 2026.04.2 | Added optional read protection for untrusted clients; blocked reads are silently dropped |
+| 2026.04.3 | Added optional untrusted-client protection: reject TCP clients early or silently drop blocked reads |
 | 2026.04.1 | Added optional write protection for untrusted clients using `trusted_networks` and `trusted_hosts` |
 | 2026.03.3 | Increased the default `rtu_response_timeout` from 100 ms to 1000 ms |
 | 2026.03.2 | If `de_pin` and `re_pin` use the same GPIO, the component now enables shared pin use automatically |
