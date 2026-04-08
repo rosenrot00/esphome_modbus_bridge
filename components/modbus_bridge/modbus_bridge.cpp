@@ -212,21 +212,21 @@ namespace esphome
       }
     }
 
-    void ProtectedUntrustedReadSwitch::write_state(bool state)
+    void ProtectUntrustedReadsSwitch::write_state(bool state)
     {
       if (this->parent_ != nullptr)
         this->parent_->set_protect_reads_for_untrusted_clients(state);
       this->publish_state(state);
     }
 
-    void ProtectedUntrustedWriteSwitch::write_state(bool state)
+    void ProtectUntrustedWritesSwitch::write_state(bool state)
     {
       if (this->parent_ != nullptr)
         this->parent_->set_protect_writes_for_untrusted_clients(state);
       this->publish_state(state);
     }
 
-    void ProtectedUntrustedClientRejectSwitch::write_state(bool state)
+    void RejectUntrustedClientsSwitch::write_state(bool state)
     {
       if (this->parent_ != nullptr)
         this->parent_->set_reject_untrusted_clients(state);
@@ -476,23 +476,23 @@ namespace esphome
     void ModbusBridgeComponent::set_protect_reads_for_untrusted_clients(bool enabled)
     {
       this->protect_reads_for_untrusted_clients_ = enabled;
-      if (this->protected_untrusted_read_switch_ != nullptr && this->protected_untrusted_read_switch_->state != enabled)
-        this->protected_untrusted_read_switch_->publish_state(enabled);
+      if (this->protect_untrusted_reads_switch_ != nullptr && this->protect_untrusted_reads_switch_->state != enabled)
+        this->protect_untrusted_reads_switch_->publish_state(enabled);
     }
 
     void ModbusBridgeComponent::set_protect_writes_for_untrusted_clients(bool enabled)
     {
       this->protect_writes_for_untrusted_clients_ = enabled;
-      if (this->protected_untrusted_write_switch_ != nullptr && this->protected_untrusted_write_switch_->state != enabled)
-        this->protected_untrusted_write_switch_->publish_state(enabled);
+      if (this->protect_untrusted_writes_switch_ != nullptr && this->protect_untrusted_writes_switch_->state != enabled)
+        this->protect_untrusted_writes_switch_->publish_state(enabled);
     }
 
     void ModbusBridgeComponent::set_reject_untrusted_clients(bool enabled)
     {
       this->reject_untrusted_clients_ = enabled;
-      if (this->protected_untrusted_client_reject_switch_ != nullptr &&
-          this->protected_untrusted_client_reject_switch_->state != enabled)
-        this->protected_untrusted_client_reject_switch_->publish_state(enabled);
+      if (this->reject_untrusted_clients_switch_ != nullptr &&
+          this->reject_untrusted_clients_switch_->state != enabled)
+        this->reject_untrusted_clients_switch_->publish_state(enabled);
     }
 
     void ModbusBridgeComponent::handle_client_rx_chunk_(std::vector<uint8_t> &accu, int client_fd, const uint8_t *data, size_t len, size_t max_accu)
