@@ -197,7 +197,7 @@ modbus_bridge:
   # protect_untrusted_writes_switch:
   #   name: "Protect Untrusted Writes"
   # trusted_networks:
-  #   - 192.168.69.0/24          # local LAN stays trusted
+  #   - 192.168.1.0/24          # local LAN stays trusted
   #   - 10.0.0.5/32              # single trusted client
   # trusted_hosts:
   #   - otherhouse.example.org   # optional: trusted remote DynDNS/static host; resolved on new connections only
