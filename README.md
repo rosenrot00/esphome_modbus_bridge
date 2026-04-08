@@ -4,6 +4,9 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge for ESP82
 
 | Version | Changes |
 |---|---|
+| 2026.04.3 | Added optional rejection of untrusted TCP clients before they can use the bridge |
+| 2026.04.2 | Added optional read protection for untrusted clients; blocked reads are silently dropped |
+| 2026.04.1 | Added optional write protection for untrusted clients using `trusted_networks` and `trusted_hosts` |
 | 2026.03.3 | Increased the default `rtu_response_timeout` from 100 ms to 1000 ms |
 | 2026.03.2 | If `de_pin` and `re_pin` use the same GPIO, the component now enables shared pin use automatically |
 | 2026.03.1 | Removed deprecated `uart_wake_loop_on_rx`; ESPHome now enables UART wake-on-RX automatically on ESP32 |
@@ -32,6 +35,9 @@ The bridge listens on a configurable TCP port (default: 502) and expects standar
 - Supports multiple TCP clients at the same time
 - Configurable port, timeouts, and client limits
 - Supports RS-485 transceivers with separate `DE`/`RE` pins or one shared GPIO
+- Optional write protection for clients outside trusted networks or trusted DNS hosts
+- Optional read protection for clients outside trusted networks or trusted DNS hosts
+- Optional rejection of untrusted TCP clients before Modbus traffic starts
 - Can run multiple bridges in one node (for multiple UART buses)
 - Auto-recovers after network/IP loss
 - Integrates easily with Home Assistant and ESPHome automations
@@ -170,15 +176,37 @@ modbus_bridge:
   id: mb_bridge
   uart_id: uart_bus
   tcp_port: 502                  # TCP port to listen on
-  # rtu_response_timeout: 1000   # ms, internally clamped to >=10 ms
+  # rtu_response_timeout: 1000    # ms, internally clamped to >=10 ms
   # tcp_client_timeout: 60000    # ms of inactivity before client is disconnected
   # tcp_allowed_clients: 2       # number of simultaneous TCP clients (min 1)
   # tcp_poll_interval: 50        # ms between TCP polls
+  # Without trusted_networks or trusted_hosts, the options below keep their state
+  # but do not block reads, writes, or client connections.
+  # reject_untrusted_clients: false            # only effective together with trusted_networks or trusted_hosts
+  # protect_reads_for_untrusted_clients: false   # only effective together with trusted_networks or trusted_hosts
+  # protect_writes_for_untrusted_clients: false  # only effective together with trusted_networks or trusted_hosts
+  # reject_untrusted_clients_switch:
+  #   name: "Reject Untrusted Clients"
+  # protect_writes_switch:
+  #   name: "Protect Remote Writes"
+  # trusted_networks:
+  #   - 192.168.69.0/24          # local LAN stays trusted
+  #   - 10.0.0.5/32              # single trusted client
+  # trusted_hosts:
+  #   - otherhouse.example.org   # optional: trusted remote DynDNS/static host; resolved on new connections only
   # de_pin: GPIO18               # Optional: RS-485 Driver Enable (DE)
   # re_pin: GPIO19               # Optional: RS-485 Receiver Enable (/RE) - de_pin and re_pin can be the same GPIO
-  # (DE and /RE may be the same GPIO if the transceiver ties them together)
+  # (DE and /RE may use the same GPIO if your RS485 transceiver or module supports a shared direction-control signal)
   # crc_bytes_swapped: false     # allows to swap CRC byte order LO/HI -> HI/LO
   # enabled: true                # allows to enable or disable during runtime
+  # Example:
+  # reject_untrusted_clients: true
+  # protect_reads_for_untrusted_clients: true
+  # protect_writes_for_untrusted_clients: true
+  # trusted_networks:
+  #   - 192.168.69.0/24
+  # trusted_hosts:
+  #   - otherhouse.example.org
 
   # Event: triggered whenever number of TCP clients changes
   on_tcp_clients_changed:
