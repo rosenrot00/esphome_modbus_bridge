@@ -1,7 +1,8 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
+import ipaddress
 from esphome import automation, pins
-from esphome.components import uart
+from esphome.components import switch, uart
 from esphome.const import CONF_ID, CONF_TRIGGER_ID
 
 CONF_TCP_PORT = "tcp_port"
@@ -13,6 +14,13 @@ CONF_DE_PIN = "de_pin"
 CONF_RE_PIN = "re_pin"
 CONF_CRC_BYTES_SWAPPED = "crc_bytes_swapped"
 CONF_ENABLED = "enabled"
+CONF_PROTECT_READS_FOR_UNTRUSTED_CLIENTS = "protect_reads_for_untrusted_clients"
+CONF_PROTECT_WRITES_FOR_UNTRUSTED_CLIENTS = "protect_writes_for_untrusted_clients"
+CONF_REJECT_UNTRUSTED_CLIENTS = "reject_untrusted_clients"
+CONF_PROTECT_WRITES_SWITCH = "protect_writes_switch"
+CONF_REJECT_UNTRUSTED_CLIENTS_SWITCH = "reject_untrusted_clients_switch"
+CONF_TRUSTED_NETWORKS = "trusted_networks"
+CONF_TRUSTED_HOSTS = "trusted_hosts"
 
 CONF_ON_RTU_SEND = "on_rtu_send"
 CONF_ON_RTU_RECEIVE = "on_rtu_receive"
@@ -23,6 +31,18 @@ CONF_ON_TCP_CLIENTS_CHANGED = "on_tcp_clients_changed"
 
 modbus_bridge_ns = cg.esphome_ns.namespace("modbus_bridge")
 ModbusBridgeComponent = modbus_bridge_ns.class_("ModbusBridgeComponent", cg.Component)
+ProtectWritesSwitch = modbus_bridge_ns.class_("ProtectWritesSwitch", switch.Switch)
+RejectUntrustedClientsSwitch = modbus_bridge_ns.class_("RejectUntrustedClientsSwitch", switch.Switch)
+
+
+def _valid_trusted_network(value):
+    try:
+        network = ipaddress.ip_network(value, strict=False)
+    except ValueError as err:
+        raise cv.Invalid(f"invalid IPv4 network '{value}': {err}") from err
+    if network.version != 4:
+        raise cv.Invalid("only IPv4 trusted networks are supported")
+    return str(network)
 
 def _pin_ref(pin_conf):
     if isinstance(pin_conf, dict):
@@ -69,6 +89,13 @@ BASE_SCHEMA = cv.All(
         cv.Optional(CONF_TCP_ALLOWED_CLIENTS, default=2): cv.positive_int,
         cv.Optional(CONF_CRC_BYTES_SWAPPED, default=False): cv.boolean,
         cv.Optional(CONF_ENABLED, default=True): cv.boolean,
+        cv.Optional(CONF_PROTECT_READS_FOR_UNTRUSTED_CLIENTS, default=False): cv.boolean,
+        cv.Optional(CONF_PROTECT_WRITES_FOR_UNTRUSTED_CLIENTS, default=False): cv.boolean,
+        cv.Optional(CONF_REJECT_UNTRUSTED_CLIENTS, default=False): cv.boolean,
+        cv.Optional(CONF_PROTECT_WRITES_SWITCH): switch.switch_schema(ProtectWritesSwitch),
+        cv.Optional(CONF_REJECT_UNTRUSTED_CLIENTS_SWITCH): switch.switch_schema(RejectUntrustedClientsSwitch),
+        cv.Optional(CONF_TRUSTED_NETWORKS, default=[]): cv.ensure_list(_valid_trusted_network),
+        cv.Optional(CONF_TRUSTED_HOSTS, default=[]): cv.ensure_list(cv.string_strict),
         # Expose bridge-global events to YAML automations
         cv.Optional(CONF_ON_RTU_SEND): automation.validate_automation(
             {
@@ -134,6 +161,26 @@ async def to_code(config):
         cg.add(var.set_tcp_allowed_clients(conf[CONF_TCP_ALLOWED_CLIENTS]))
         cg.add(var.set_crc_bytes_swapped(conf[CONF_CRC_BYTES_SWAPPED]))
         cg.add(var.set_enabled(conf[CONF_ENABLED]))
+        cg.add(var.set_protect_reads_for_untrusted_clients(conf[CONF_PROTECT_READS_FOR_UNTRUSTED_CLIENTS]))
+        cg.add(var.set_protect_writes_for_untrusted_clients(conf[CONF_PROTECT_WRITES_FOR_UNTRUSTED_CLIENTS]))
+        cg.add(var.set_reject_untrusted_clients(conf[CONF_REJECT_UNTRUSTED_CLIENTS]))
+
+        if CONF_PROTECT_WRITES_SWITCH in conf:
+            sw = await switch.new_switch(conf[CONF_PROTECT_WRITES_SWITCH])
+            cg.add(sw.set_parent(var))
+            cg.add(var.set_protect_writes_switch(sw))
+
+        if CONF_REJECT_UNTRUSTED_CLIENTS_SWITCH in conf:
+            sw = await switch.new_switch(conf[CONF_REJECT_UNTRUSTED_CLIENTS_SWITCH])
+            cg.add(sw.set_parent(var))
+            cg.add(var.set_reject_untrusted_clients_switch(sw))
+
+        for net in conf[CONF_TRUSTED_NETWORKS]:
+            parsed = ipaddress.ip_network(net, strict=False)
+            cg.add(var.add_trusted_network(int(parsed.network_address), int(parsed.netmask)))
+
+        for host in conf[CONF_TRUSTED_HOSTS]:
+            cg.add(var.add_trusted_host(host))
 
         # Bind YAML automations → C++ callbacks (function_code, address)
         async def _bind(list_key: str, adder: str):

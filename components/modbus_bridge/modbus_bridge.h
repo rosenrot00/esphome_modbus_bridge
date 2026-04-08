@@ -2,11 +2,13 @@
 
 #include "esphome/core/component.h"
 #include "esphome/components/uart/uart.h"
+#include "esphome/components/switch/switch.h"
 #include "esphome/core/hal.h" // GPIOPin
 #include <vector>
 #include <functional>
 #include <cstring>
 #include <deque>
+#include <string>
 #include "esphome/core/automation.h" // Brings in CallbackManager & Trigger types transitively
 
 #ifdef USE_ESP8266
@@ -24,6 +26,9 @@ namespace esphome
       WiFiClient socket;
       uint32_t last_activity = 0;
       bool disconnect_notified = false; // suppress repeated disconnect logs
+      uint32_t remote_ipv4 = 0;
+      uint16_t remote_port = 0;
+      bool trusted = true;
     };
 #endif
 
@@ -32,8 +37,39 @@ namespace esphome
     {
       int fd = -1;
       uint32_t last_activity = 0;
+      uint32_t remote_ipv4 = 0;
+      uint16_t remote_port = 0;
+      bool trusted = true;
     };
 #endif
+
+    struct TrustedNetwork
+    {
+      uint32_t network = 0;
+      uint32_t mask = 0;
+    };
+
+    class ModbusBridgeComponent;
+
+    class ProtectWritesSwitch : public switch_::Switch
+    {
+    public:
+      void set_parent(ModbusBridgeComponent *parent) { parent_ = parent; }
+
+    protected:
+      void write_state(bool state) override;
+      ModbusBridgeComponent *parent_{nullptr};
+    };
+
+    class RejectUntrustedClientsSwitch : public switch_::Switch
+    {
+    public:
+      void set_parent(ModbusBridgeComponent *parent) { parent_ = parent; }
+
+    protected:
+      void write_state(bool state) override;
+      ModbusBridgeComponent *parent_{nullptr};
+    };
 
     struct PendingRequest
     {
@@ -75,6 +111,13 @@ namespace esphome
       }
       void set_crc_bytes_swapped(bool swapped) { crc_bytes_swapped_ = swapped; }
       void set_enabled(bool enabled);
+      void set_protect_reads_for_untrusted_clients(bool enabled) { protect_reads_for_untrusted_clients_ = enabled; }
+      void set_protect_writes_for_untrusted_clients(bool enabled);
+      void set_protect_writes_switch(ProtectWritesSwitch *sw) { protect_writes_switch_ = sw; }
+      void set_reject_untrusted_clients(bool enabled);
+      void set_reject_untrusted_clients_switch(RejectUntrustedClientsSwitch *sw) { reject_untrusted_clients_switch_ = sw; }
+      void add_trusted_network(uint32_t network, uint32_t mask) { trusted_networks_.push_back({network, mask}); }
+      void add_trusted_host(const std::string &host) { trusted_hosts_.push_back(host); }
       bool is_enabled() const;
 
       // Lightweight runtime stats (monotonic counters)
@@ -126,6 +169,13 @@ namespace esphome
       uint8_t tcp_allowed_clients_{2};
       bool crc_bytes_swapped_{false};
       bool enabled_{true};
+      bool protect_reads_for_untrusted_clients_{false};
+      bool protect_writes_for_untrusted_clients_{false};
+      bool reject_untrusted_clients_{false};
+      ProtectWritesSwitch *protect_writes_switch_{nullptr};
+      RejectUntrustedClientsSwitch *reject_untrusted_clients_switch_{nullptr};
+      std::vector<TrustedNetwork> trusted_networks_;
+      std::vector<std::string> trusted_hosts_;
 
       bool polling_active_{false};
 
@@ -167,6 +217,12 @@ namespace esphome
       void prepare_rx_accumulator_(std::vector<std::vector<uint8_t>> &accu, size_t target_size, size_t reserve_cap);
       void handle_client_rx_chunk_(std::vector<uint8_t> &accu, int client_fd, const uint8_t *data, size_t len, size_t max_accu);
       bool is_client_slot_connected_(int slot);
+      bool is_client_slot_trusted_(int slot) const;
+      bool has_trust_rules_() const;
+      bool is_read_protection_effective_() const;
+      bool is_write_protection_effective_() const;
+      bool is_reject_untrusted_clients_effective_() const;
+      bool is_trusted_client_ipv4_(uint32_t remote_ipv4) const;
       void send_rtu_request_(PendingRequest &req);
       bool finish_current_and_send_next_();
       void fire_rtu_timeout_for_request_(const PendingRequest &req);

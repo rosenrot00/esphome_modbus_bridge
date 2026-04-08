@@ -13,6 +13,7 @@
 #include <lwip/sockets.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <netdb.h>
 #endif
 
 #include "modbus_bridge.h"
@@ -34,6 +35,7 @@ namespace esphome
     static constexpr size_t kMaxFramesPerLoop = 8;
     // Runtime toggle: preempt oldest same-IP connection when full
     static bool kPreemptSameIP = true;
+    static constexpr uint8_t kModbusExceptionIllegalFunction = 0x01;
 
     // Centralized caps
     static constexpr uint16_t MODBUS_TCP_LEN_CAP = 260;            // UID+PDU (LEN field)
@@ -78,6 +80,26 @@ namespace esphome
     static inline std::string to_hex(const std::vector<uint8_t> &v, size_t max_bytes = 64)
     {
       return to_hex(v.data(), v.size(), max_bytes);
+    }
+
+#ifdef USE_ESP8266
+    static inline uint32_t ipv4_to_u32_(const IPAddress &ip)
+    {
+      return (static_cast<uint32_t>(ip[0]) << 24) |
+             (static_cast<uint32_t>(ip[1]) << 16) |
+             (static_cast<uint32_t>(ip[2]) << 8) |
+             static_cast<uint32_t>(ip[3]);
+    }
+#endif
+
+    static inline const char *ipv4_to_cstr_(uint32_t ip, char *buf, size_t len)
+    {
+      snprintf(buf, len, "%u.%u.%u.%u",
+               static_cast<unsigned>((ip >> 24) & 0xFF),
+               static_cast<unsigned>((ip >> 16) & 0xFF),
+               static_cast<unsigned>((ip >> 8) & 0xFF),
+               static_cast<unsigned>(ip & 0xFF));
+      return buf;
     }
 
     // Drain UART RX (templated to avoid pulling specific UART headers here)
@@ -148,6 +170,60 @@ namespace esphome
       out.push_back(mbap_len & 0xFF);
       out.push_back(rtu_resp[0]);                                      // UID
       out.insert(out.end(), rtu_resp.begin() + 1, rtu_resp.end() - 2); // PDU (FC+Data), drop CRC
+    }
+
+    static inline void build_tcp_exception_from_request(const uint8_t *request, uint8_t exception_code, std::vector<uint8_t> &out)
+    {
+      out.clear();
+      out.reserve(9);
+      out.insert(out.end(), request, request + 4); // TID + PID
+      out.push_back(0x00);
+      out.push_back(0x03);                         // LEN = UID + FC + EXC
+      out.push_back(request[6]);                  // UID
+      out.push_back(request[7] | 0x80);           // Exception FC
+      out.push_back(exception_code);
+    }
+
+    static inline bool is_modbus_write_fc_(uint8_t fc)
+    {
+      switch (fc)
+      {
+      case 0x05:
+      case 0x06:
+      case 0x0F:
+      case 0x10:
+        return true;
+      default:
+        return false;
+      }
+    }
+
+    static inline bool is_modbus_read_fc_(uint8_t fc)
+    {
+      switch (fc)
+      {
+      case 0x01:
+      case 0x02:
+      case 0x03:
+      case 0x04:
+        return true;
+      default:
+        return false;
+      }
+    }
+
+    void ProtectWritesSwitch::write_state(bool state)
+    {
+      if (this->parent_ != nullptr)
+        this->parent_->set_protect_writes_for_untrusted_clients(state);
+      this->publish_state(state);
+    }
+
+    void RejectUntrustedClientsSwitch::write_state(bool state)
+    {
+      if (this->parent_ != nullptr)
+        this->parent_->set_reject_untrusted_clients(state);
+      this->publish_state(state);
     }
 
     // Member method to unify sending to a client slot on both platforms
@@ -327,6 +403,81 @@ namespace esphome
         if (v.capacity() < reserve_cap)
           v.reserve(reserve_cap);
       }
+    }
+
+    bool ModbusBridgeComponent::is_trusted_client_ipv4_(uint32_t remote_ipv4) const
+    {
+      for (const auto &net : this->trusted_networks_)
+      {
+        if ((remote_ipv4 & net.mask) == net.network)
+          return true;
+      }
+      if (this->trusted_hosts_.empty())
+        return false;
+
+#if defined(USE_ESP8266)
+      IPAddress resolved_ip;
+      for (const auto &host : this->trusted_hosts_)
+      {
+        if (WiFi.hostByName(host.c_str(), resolved_ip) == 1 && ipv4_to_u32_(resolved_ip) == remote_ipv4)
+          return true;
+      }
+#elif defined(USE_ESP32)
+      struct addrinfo hints = {};
+      hints.ai_family = AF_INET;
+      hints.ai_socktype = SOCK_STREAM;
+      for (const auto &host : this->trusted_hosts_)
+      {
+        struct addrinfo *res = nullptr;
+        if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || res == nullptr)
+          continue;
+        for (struct addrinfo *it = res; it != nullptr; it = it->ai_next)
+        {
+          auto *addr = reinterpret_cast<struct sockaddr_in *>(it->ai_addr);
+          if (addr != nullptr && ntohl(addr->sin_addr.s_addr) == remote_ipv4)
+          {
+            freeaddrinfo(res);
+            return true;
+          }
+        }
+        freeaddrinfo(res);
+      }
+#endif
+      return false;
+    }
+
+    bool ModbusBridgeComponent::is_write_protection_effective_() const
+    {
+      return this->protect_writes_for_untrusted_clients_ && this->has_trust_rules_();
+    }
+
+    bool ModbusBridgeComponent::is_read_protection_effective_() const
+    {
+      return this->protect_reads_for_untrusted_clients_ && this->has_trust_rules_();
+    }
+
+    bool ModbusBridgeComponent::is_reject_untrusted_clients_effective_() const
+    {
+      return this->reject_untrusted_clients_ && this->has_trust_rules_();
+    }
+
+    bool ModbusBridgeComponent::has_trust_rules_() const
+    {
+      return !this->trusted_networks_.empty() || !this->trusted_hosts_.empty();
+    }
+
+    void ModbusBridgeComponent::set_protect_writes_for_untrusted_clients(bool enabled)
+    {
+      this->protect_writes_for_untrusted_clients_ = enabled;
+      if (this->protect_writes_switch_ != nullptr && this->protect_writes_switch_->state != enabled)
+        this->protect_writes_switch_->publish_state(enabled);
+    }
+
+    void ModbusBridgeComponent::set_reject_untrusted_clients(bool enabled)
+    {
+      this->reject_untrusted_clients_ = enabled;
+      if (this->reject_untrusted_clients_switch_ != nullptr && this->reject_untrusted_clients_switch_->state != enabled)
+        this->reject_untrusted_clients_switch_->publish_state(enabled);
     }
 
     void ModbusBridgeComponent::handle_client_rx_chunk_(std::vector<uint8_t> &accu, int client_fd, const uint8_t *data, size_t len, size_t max_accu)
@@ -649,6 +800,24 @@ namespace esphome
       if (len < 6 + modbus_len)
         return;
 
+      const uint8_t fc = data[7];
+      if (this->is_read_protection_effective_() && is_modbus_read_fc_(fc) && !this->is_client_slot_trusted_(client_fd))
+      {
+        if (this->debug_)
+          ESP_LOGW(TAG, "Dropping untrusted Modbus read FC 0x%02X from client_id=%d", fc, client_fd);
+        return;
+      }
+      if (this->is_write_protection_effective_() && is_modbus_write_fc_(fc) && !this->is_client_slot_trusted_(client_fd))
+      {
+        std::vector<uint8_t> tcp_response;
+        build_tcp_exception_from_request(data, kModbusExceptionIllegalFunction, tcp_response);
+        if (this->debug_)
+          ESP_LOGW(TAG, "Blocking untrusted Modbus write FC 0x%02X from client_id=%d", fc, client_fd);
+        this->send_to_client_(client_fd, tcp_response.data(), tcp_response.size());
+        g_frames_out++;
+        return;
+      }
+
       uint8_t uid = data[6];
 
       PendingRequest req;
@@ -736,13 +905,23 @@ namespace esphome
       WiFiClient new_client = this->server_.accept();
       if (!new_client)
         return;
+      const uint32_t remote_ipv4 = ipv4_to_u32_(new_client.remoteIP());
+      const uint16_t remote_port = new_client.remotePort();
+      const bool trusted = !this->has_trust_rules_() || this->is_trusted_client_ipv4_(remote_ipv4);
+      char ipbuf[16];
+      if (this->is_reject_untrusted_clients_effective_() && !trusted)
+      {
+        ESP_LOGW(TAG, "Rejecting untrusted TCP client %s:%u", ipv4_to_cstr_(remote_ipv4, ipbuf, sizeof(ipbuf)), (unsigned) remote_port);
+        new_client.stop();
+        return;
+      }
 
       const size_t duplicate_idx = find_first_slot_(this->clients_.size(), [&](size_t idx)
       {
         auto &ex = this->clients_[idx];
         return ex.socket.connected() &&
-               ex.socket.remoteIP() == new_client.remoteIP() &&
-               ex.socket.remotePort() == new_client.remotePort();
+               ex.remote_ipv4 == remote_ipv4 &&
+               ex.remote_port == remote_port;
       });
       if (duplicate_idx != SIZE_MAX)
       {
@@ -754,6 +933,9 @@ namespace esphome
         ex.socket.setTimeout(10);
         ex.last_activity = millis();
         ex.disconnect_notified = false;
+        ex.remote_ipv4 = remote_ipv4;
+        ex.remote_port = remote_port;
+        ex.trusted = trusted;
         this->refresh_tcp_client_count_();
         return;
       }
@@ -774,7 +956,11 @@ namespace esphome
         this->clients_[free_idx].last_activity = millis();
         this->rx_accu8266_[free_idx].clear();
         this->clients_[free_idx].disconnect_notified = false;
-        ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d", new_client.remoteIP().toString().c_str(), (unsigned)new_client.remotePort(), (int)free_idx);
+        this->clients_[free_idx].remote_ipv4 = remote_ipv4;
+        this->clients_[free_idx].remote_port = remote_port;
+        this->clients_[free_idx].trusted = trusted;
+        ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d trusted=%s",
+                 ipv4_to_cstr_(remote_ipv4, ipbuf, sizeof(ipbuf)), (unsigned)remote_port, (int)free_idx, trusted ? "yes" : "no");
         this->record_tcp_client_connected_();
         return;
       }
@@ -786,12 +972,17 @@ namespace esphome
         client.socket.setNoDelay(true);
         client.socket.setTimeout(10);
         client.last_activity = millis();
+        client.remote_ipv4 = remote_ipv4;
+        client.remote_port = remote_port;
+        client.trusted = trusted;
         this->clients_.push_back(client);
         this->rx_accu8266_.emplace_back();
         if (this->rx_accu8266_.back().capacity() < kTcpAccuCap8266)
           this->rx_accu8266_.back().reserve(kTcpAccuCap8266);
         this->clients_.back().disconnect_notified = false;
-        ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d", new_client.remoteIP().toString().c_str(), (unsigned)new_client.remotePort(), (int)(this->clients_.size() - 1));
+        ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d trusted=%s",
+                 ipv4_to_cstr_(remote_ipv4, ipbuf, sizeof(ipbuf)), (unsigned)remote_port,
+                 (int)(this->clients_.size() - 1), trusted ? "yes" : "no");
         this->record_tcp_client_connected_();
         return;
       }
@@ -801,9 +992,9 @@ namespace esphome
       {
         const size_t victim = find_oldest_slot_(std::min(allowed_clients, this->clients_.size()),
                                                 [&](size_t idx)
-        {
+                                                {
                                                   auto &cl = this->clients_[idx];
-                                                  return cl.socket.connected() && cl.socket.remoteIP() == new_client.remoteIP();
+                                                  return cl.socket.connected() && cl.remote_ipv4 == remote_ipv4;
                                                 },
                                                 [&](size_t idx)
                                                 { return this->clients_[idx].last_activity; });
@@ -817,6 +1008,9 @@ namespace esphome
           this->clients_[victim].socket.setTimeout(10);
           this->clients_[victim].last_activity = millis();
           this->clients_[victim].disconnect_notified = false;
+          this->clients_[victim].remote_ipv4 = remote_ipv4;
+          this->clients_[victim].remote_port = remote_port;
+          this->clients_[victim].trusted = trusted;
           INC(g_preempt_events);
           this->record_tcp_client_connected_();
           preempted = true;
@@ -841,22 +1035,25 @@ namespace esphome
       if (newfd < 0)
         return;
 
+      const uint32_t remote_ipv4 = ntohl(client_addr.sin_addr.s_addr);
+      const uint16_t remote_port = ntohs(client_addr.sin_port);
+      const bool trusted = !this->has_trust_rules_() || this->is_trusted_client_ipv4_(remote_ipv4);
       char client_ip[INET_ADDRSTRLEN];
       inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
       if (this->debug_)
-        ESP_LOGD(TAG, "TCP accept %s:%d", client_ip, ntohs(client_addr.sin_port));
+        ESP_LOGD(TAG, "TCP accept %s:%d", client_ip, remote_port);
+      if (this->is_reject_untrusted_clients_effective_() && !trusted)
+      {
+        ESP_LOGW(TAG, "Rejecting untrusted TCP client %s:%u", client_ip, (unsigned) remote_port);
+        close(newfd);
+        return;
+      }
 
       configure_tcp_client_socket_(newfd);
       const size_t duplicate_idx = find_first_slot_(this->clients_.size(), [&](size_t idx)
       {
         auto &c = this->clients_[idx];
-        if (c.fd < 0)
-          return false;
-        struct sockaddr_in existing_addr;
-        socklen_t len = sizeof(existing_addr);
-        return getpeername(c.fd, (struct sockaddr *)&existing_addr, &len) == 0 &&
-               existing_addr.sin_addr.s_addr == client_addr.sin_addr.s_addr &&
-               existing_addr.sin_port == client_addr.sin_port;
+        return c.fd >= 0 && c.remote_ipv4 == remote_ipv4 && c.remote_port == remote_port;
       });
       if (duplicate_idx != SIZE_MAX)
       {
@@ -865,6 +1062,9 @@ namespace esphome
         close(c.fd);
         c.fd = newfd;
         c.last_activity = millis();
+        c.remote_ipv4 = remote_ipv4;
+        c.remote_port = remote_port;
+        c.trusted = trusted;
         this->refresh_tcp_client_count_();
         return;
       }
@@ -878,7 +1078,10 @@ namespace esphome
         auto &c = this->clients_[free_idx];
         c.fd = newfd;
         c.last_activity = millis();
-        ESP_LOGI(TAG, "TCP connect %s:%d client_id=%zu", client_ip, ntohs(client_addr.sin_port), free_idx);
+        c.remote_ipv4 = remote_ipv4;
+        c.remote_port = remote_port;
+        c.trusted = trusted;
+        ESP_LOGI(TAG, "TCP connect %s:%u client_id=%zu trusted=%s", client_ip, (unsigned)remote_port, free_idx, trusted ? "yes" : "no");
         this->record_tcp_client_connected_();
         return;
       }
@@ -888,14 +1091,9 @@ namespace esphome
       {
         const size_t victim = find_oldest_slot_(allowed_clients,
                                                 [&](size_t idx)
-        {
+                                                {
                                                   auto &c = this->clients_[idx];
-                                                  if (c.fd < 0)
-                                                    return false;
-                                                  struct sockaddr_in ex;
-                                                  socklen_t l = sizeof(ex);
-                                                  return getpeername(c.fd, (struct sockaddr *)&ex, &l) == 0 &&
-                                                         ex.sin_addr.s_addr == client_addr.sin_addr.s_addr;
+                                                  return c.fd >= 0 && c.remote_ipv4 == remote_ipv4;
                                                 },
                                                 [&](size_t idx)
                                                 { return this->clients_[idx].last_activity; });
@@ -905,6 +1103,9 @@ namespace esphome
           close(this->clients_[victim].fd);
           this->clients_[victim].fd = newfd;
           this->clients_[victim].last_activity = millis();
+          this->clients_[victim].remote_ipv4 = remote_ipv4;
+          this->clients_[victim].remote_port = remote_port;
+          this->clients_[victim].trusted = trusted;
           INC(g_preempt_events);
           this->record_tcp_client_connected_();
           preempted = true;
@@ -1099,8 +1300,8 @@ namespace esphome
 #endif
     }
 
-    bool ModbusBridgeComponent::is_client_slot_connected_(int slot)
-    {
+	    bool ModbusBridgeComponent::is_client_slot_connected_(int slot)
+	    {
       if (slot < 0 || slot >= (int)this->clients_.size())
         return false;
 #if defined(USE_ESP8266)
@@ -1109,7 +1310,14 @@ namespace esphome
       return this->clients_[slot].fd >= 0;
 #else
       return false;
-#endif
+	#endif
+	    }
+
+    bool ModbusBridgeComponent::is_client_slot_trusted_(int slot) const
+    {
+      if (slot < 0 || slot >= (int)this->clients_.size())
+        return false;
+      return this->clients_[slot].trusted;
     }
 
     void ModbusBridgeComponent::send_rtu_request_(PendingRequest &req)
