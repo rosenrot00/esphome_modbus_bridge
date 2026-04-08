@@ -17,8 +17,9 @@ CONF_ENABLED = "enabled"
 CONF_PROTECT_READS_FOR_UNTRUSTED_CLIENTS = "protect_reads_for_untrusted_clients"
 CONF_PROTECT_WRITES_FOR_UNTRUSTED_CLIENTS = "protect_writes_for_untrusted_clients"
 CONF_REJECT_UNTRUSTED_CLIENTS = "reject_untrusted_clients"
-CONF_PROTECT_WRITES_SWITCH = "protect_writes_switch"
-CONF_REJECT_UNTRUSTED_CLIENTS_SWITCH = "reject_untrusted_clients_switch"
+CONF_PROTECTED_UNTRUSTED_READ_SWITCH = "protected_untrusted_read_switch"
+CONF_PROTECTED_UNTRUSTED_WRITE_SWITCH = "protected_untrusted_write_switch"
+CONF_PROTECTED_UNTRUSTED_CLIENT_REJECT_SWITCH = "protected_untrusted_client_reject_switch"
 CONF_TRUSTED_NETWORKS = "trusted_networks"
 CONF_TRUSTED_HOSTS = "trusted_hosts"
 
@@ -31,8 +32,9 @@ CONF_ON_TCP_CLIENTS_CHANGED = "on_tcp_clients_changed"
 
 modbus_bridge_ns = cg.esphome_ns.namespace("modbus_bridge")
 ModbusBridgeComponent = modbus_bridge_ns.class_("ModbusBridgeComponent", cg.Component)
-ProtectWritesSwitch = modbus_bridge_ns.class_("ProtectWritesSwitch", switch.Switch)
-RejectUntrustedClientsSwitch = modbus_bridge_ns.class_("RejectUntrustedClientsSwitch", switch.Switch)
+ProtectedUntrustedReadSwitch = modbus_bridge_ns.class_("ProtectedUntrustedReadSwitch", switch.Switch)
+ProtectedUntrustedWriteSwitch = modbus_bridge_ns.class_("ProtectedUntrustedWriteSwitch", switch.Switch)
+ProtectedUntrustedClientRejectSwitch = modbus_bridge_ns.class_("ProtectedUntrustedClientRejectSwitch", switch.Switch)
 
 
 def _valid_trusted_network(value):
@@ -92,8 +94,9 @@ BASE_SCHEMA = cv.All(
         cv.Optional(CONF_PROTECT_READS_FOR_UNTRUSTED_CLIENTS, default=False): cv.boolean,
         cv.Optional(CONF_PROTECT_WRITES_FOR_UNTRUSTED_CLIENTS, default=False): cv.boolean,
         cv.Optional(CONF_REJECT_UNTRUSTED_CLIENTS, default=False): cv.boolean,
-        cv.Optional(CONF_PROTECT_WRITES_SWITCH): switch.switch_schema(ProtectWritesSwitch),
-        cv.Optional(CONF_REJECT_UNTRUSTED_CLIENTS_SWITCH): switch.switch_schema(RejectUntrustedClientsSwitch),
+        cv.Optional(CONF_PROTECTED_UNTRUSTED_READ_SWITCH): switch.switch_schema(ProtectedUntrustedReadSwitch),
+        cv.Optional(CONF_PROTECTED_UNTRUSTED_WRITE_SWITCH): switch.switch_schema(ProtectedUntrustedWriteSwitch),
+        cv.Optional(CONF_PROTECTED_UNTRUSTED_CLIENT_REJECT_SWITCH): switch.switch_schema(ProtectedUntrustedClientRejectSwitch),
         cv.Optional(CONF_TRUSTED_NETWORKS, default=[]): cv.ensure_list(_valid_trusted_network),
         cv.Optional(CONF_TRUSTED_HOSTS, default=[]): cv.ensure_list(cv.string_strict),
         # Expose bridge-global events to YAML automations
@@ -165,15 +168,20 @@ async def to_code(config):
         cg.add(var.set_protect_writes_for_untrusted_clients(conf[CONF_PROTECT_WRITES_FOR_UNTRUSTED_CLIENTS]))
         cg.add(var.set_reject_untrusted_clients(conf[CONF_REJECT_UNTRUSTED_CLIENTS]))
 
-        if CONF_PROTECT_WRITES_SWITCH in conf:
-            sw = await switch.new_switch(conf[CONF_PROTECT_WRITES_SWITCH])
+        if CONF_PROTECTED_UNTRUSTED_READ_SWITCH in conf:
+            sw = await switch.new_switch(conf[CONF_PROTECTED_UNTRUSTED_READ_SWITCH])
             cg.add(sw.set_parent(var))
-            cg.add(var.set_protect_writes_switch(sw))
+            cg.add(var.set_protected_untrusted_read_switch(sw))
 
-        if CONF_REJECT_UNTRUSTED_CLIENTS_SWITCH in conf:
-            sw = await switch.new_switch(conf[CONF_REJECT_UNTRUSTED_CLIENTS_SWITCH])
+        if CONF_PROTECTED_UNTRUSTED_WRITE_SWITCH in conf:
+            sw = await switch.new_switch(conf[CONF_PROTECTED_UNTRUSTED_WRITE_SWITCH])
             cg.add(sw.set_parent(var))
-            cg.add(var.set_reject_untrusted_clients_switch(sw))
+            cg.add(var.set_protected_untrusted_write_switch(sw))
+
+        if CONF_PROTECTED_UNTRUSTED_CLIENT_REJECT_SWITCH in conf:
+            sw = await switch.new_switch(conf[CONF_PROTECTED_UNTRUSTED_CLIENT_REJECT_SWITCH])
+            cg.add(sw.set_parent(var))
+            cg.add(var.set_protected_untrusted_client_reject_switch(sw))
 
         for net in conf[CONF_TRUSTED_NETWORKS]:
             parsed = ipaddress.ip_network(net, strict=False)

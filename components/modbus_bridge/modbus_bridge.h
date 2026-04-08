@@ -51,7 +51,7 @@ namespace esphome
 
     class ModbusBridgeComponent;
 
-    class ProtectWritesSwitch : public switch_::Switch
+    class ProtectedUntrustedReadSwitch : public switch_::Switch
     {
     public:
       void set_parent(ModbusBridgeComponent *parent) { parent_ = parent; }
@@ -61,7 +61,17 @@ namespace esphome
       ModbusBridgeComponent *parent_{nullptr};
     };
 
-    class RejectUntrustedClientsSwitch : public switch_::Switch
+    class ProtectedUntrustedWriteSwitch : public switch_::Switch
+    {
+    public:
+      void set_parent(ModbusBridgeComponent *parent) { parent_ = parent; }
+
+    protected:
+      void write_state(bool state) override;
+      ModbusBridgeComponent *parent_{nullptr};
+    };
+
+    class ProtectedUntrustedClientRejectSwitch : public switch_::Switch
     {
     public:
       void set_parent(ModbusBridgeComponent *parent) { parent_ = parent; }
@@ -111,11 +121,12 @@ namespace esphome
       }
       void set_crc_bytes_swapped(bool swapped) { crc_bytes_swapped_ = swapped; }
       void set_enabled(bool enabled);
-      void set_protect_reads_for_untrusted_clients(bool enabled) { protect_reads_for_untrusted_clients_ = enabled; }
+      void set_protect_reads_for_untrusted_clients(bool enabled);
       void set_protect_writes_for_untrusted_clients(bool enabled);
-      void set_protect_writes_switch(ProtectWritesSwitch *sw) { protect_writes_switch_ = sw; }
+      void set_protected_untrusted_read_switch(ProtectedUntrustedReadSwitch *sw) { protected_untrusted_read_switch_ = sw; }
+      void set_protected_untrusted_write_switch(ProtectedUntrustedWriteSwitch *sw) { protected_untrusted_write_switch_ = sw; }
       void set_reject_untrusted_clients(bool enabled);
-      void set_reject_untrusted_clients_switch(RejectUntrustedClientsSwitch *sw) { reject_untrusted_clients_switch_ = sw; }
+      void set_protected_untrusted_client_reject_switch(ProtectedUntrustedClientRejectSwitch *sw) { protected_untrusted_client_reject_switch_ = sw; }
       void add_trusted_network(uint32_t network, uint32_t mask) { trusted_networks_.push_back({network, mask}); }
       void add_trusted_host(const std::string &host) { trusted_hosts_.push_back(host); }
       bool is_enabled() const;
@@ -172,8 +183,9 @@ namespace esphome
       bool protect_reads_for_untrusted_clients_{false};
       bool protect_writes_for_untrusted_clients_{false};
       bool reject_untrusted_clients_{false};
-      ProtectWritesSwitch *protect_writes_switch_{nullptr};
-      RejectUntrustedClientsSwitch *reject_untrusted_clients_switch_{nullptr};
+      ProtectedUntrustedReadSwitch *protected_untrusted_read_switch_{nullptr};
+      ProtectedUntrustedWriteSwitch *protected_untrusted_write_switch_{nullptr};
+      ProtectedUntrustedClientRejectSwitch *protected_untrusted_client_reject_switch_{nullptr};
       std::vector<TrustedNetwork> trusted_networks_;
       std::vector<std::string> trusted_hosts_;
 
