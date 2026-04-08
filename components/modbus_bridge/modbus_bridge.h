@@ -137,6 +137,9 @@ namespace esphome
       uint32_t get_drops_pid() const;
       uint32_t get_drops_tcp_len() const;
       uint32_t get_drops_rtu_incomplete() const;
+      uint32_t get_drop_untrusted_reads() const;
+      uint32_t get_block_untrusted_writes() const;
+      uint32_t get_reject_untrusted_clients() const;
       uint32_t get_timeouts() const;
       uint32_t get_clients_connected_total() const;
       uint32_t get_noslot_events() const;

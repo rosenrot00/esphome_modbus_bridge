@@ -50,6 +50,9 @@ namespace esphome
     static uint32_t g_drops_pid = 0;
     static uint32_t g_drops_tcp_len = 0;
     static uint32_t g_drops_rtu_incomplete = 0;
+    static uint32_t g_drop_untrusted_reads = 0;
+    static uint32_t g_block_untrusted_writes = 0;
+    static uint32_t g_reject_untrusted_clients = 0;
     static uint32_t g_timeouts = 0;
     static uint32_t g_clients_connected = 0;
     static uint32_t g_noslot_events = 0;  // number of times a new client was rejected due to no free slot
@@ -630,9 +633,11 @@ namespace esphome
             for (auto &cl : this->clients_) if (cl.fd >= 0) clients_active++;
         #endif
         ESP_LOGD(TAG,
-                "stats: in=%u out=%u drops(pid)=%u drops(tcp_len)=%u drops(rtu_incomplete)=%u timeouts=%u clients_active=%u clients_total=%u noslot=%u preempt=%u",
+                "stats: in=%u out=%u drops(pid)=%u drops(tcp_len)=%u drops(rtu_incomplete)=%u drop_untrusted_reads=%u block_untrusted_writes=%u reject_untrusted_clients=%u timeouts=%u clients_active=%u clients_total=%u noslot=%u preempt=%u",
                 (unsigned)g_frames_in, (unsigned)g_frames_out, (unsigned)g_drops_pid,
-                (unsigned)g_drops_tcp_len, (unsigned)g_drops_rtu_incomplete, (unsigned)g_timeouts,
+                (unsigned)g_drops_tcp_len, (unsigned)g_drops_rtu_incomplete,
+                (unsigned)g_drop_untrusted_reads, (unsigned)g_block_untrusted_writes,
+                (unsigned)g_reject_untrusted_clients, (unsigned)g_timeouts,
                 (unsigned)clients_active, (unsigned)g_clients_connected,
                 (unsigned)g_noslot_events, (unsigned)g_preempt_events); });
       }
@@ -818,12 +823,14 @@ namespace esphome
       const uint8_t fc = data[7];
       if (this->is_read_protection_effective_() && is_modbus_read_fc_(fc) && !this->is_client_slot_trusted_(client_fd))
       {
+        g_drop_untrusted_reads++;
         if (this->debug_)
           ESP_LOGW(TAG, "Dropping untrusted Modbus read FC 0x%02X from client_id=%d", fc, client_fd);
         return;
       }
       if (this->is_write_protection_effective_() && is_modbus_write_fc_(fc) && !this->is_client_slot_trusted_(client_fd))
       {
+        g_block_untrusted_writes++;
         std::vector<uint8_t> tcp_response;
         build_tcp_exception_from_request(data, kModbusExceptionIllegalFunction, tcp_response);
         if (this->debug_)
@@ -926,6 +933,7 @@ namespace esphome
       char ipbuf[16];
       if (this->is_reject_untrusted_clients_effective_() && !trusted)
       {
+        g_reject_untrusted_clients++;
         ESP_LOGW(TAG, "Rejecting untrusted TCP client %s:%u", ipv4_to_cstr_(remote_ipv4, ipbuf, sizeof(ipbuf)), (unsigned) remote_port);
         new_client.stop();
         return;
@@ -1059,6 +1067,7 @@ namespace esphome
         ESP_LOGD(TAG, "TCP accept %s:%d", client_ip, remote_port);
       if (this->is_reject_untrusted_clients_effective_() && !trusted)
       {
+        g_reject_untrusted_clients++;
         ESP_LOGW(TAG, "Rejecting untrusted TCP client %s:%u", client_ip, (unsigned) remote_port);
         close(newfd);
         return;
@@ -1556,6 +1565,9 @@ namespace esphome
     uint32_t ModbusBridgeComponent::get_drops_pid() const { return g_drops_pid; }
     uint32_t ModbusBridgeComponent::get_drops_tcp_len() const { return g_drops_tcp_len; }
     uint32_t ModbusBridgeComponent::get_drops_rtu_incomplete() const { return g_drops_rtu_incomplete; }
+    uint32_t ModbusBridgeComponent::get_drop_untrusted_reads() const { return g_drop_untrusted_reads; }
+    uint32_t ModbusBridgeComponent::get_block_untrusted_writes() const { return g_block_untrusted_writes; }
+    uint32_t ModbusBridgeComponent::get_reject_untrusted_clients() const { return g_reject_untrusted_clients; }
     uint32_t ModbusBridgeComponent::get_timeouts() const { return g_timeouts; }
     uint32_t ModbusBridgeComponent::get_clients_connected_total() const { return g_clients_connected; }
     uint32_t ModbusBridgeComponent::get_noslot_events() const { return g_noslot_events; }
