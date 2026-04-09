@@ -123,10 +123,10 @@ namespace esphome
       void set_enabled(bool enabled);
       void set_protect_reads_for_untrusted_clients(bool enabled);
       void set_protect_writes_for_untrusted_clients(bool enabled);
-      void set_protect_untrusted_reads_switch(ProtectUntrustedReadsSwitch *sw) { protect_untrusted_reads_switch_ = sw; }
-      void set_protect_untrusted_writes_switch(ProtectUntrustedWritesSwitch *sw) { protect_untrusted_writes_switch_ = sw; }
+      void set_protect_untrusted_reads_switch(ProtectUntrustedReadsSwitch *sw);
+      void set_protect_untrusted_writes_switch(ProtectUntrustedWritesSwitch *sw);
       void set_reject_untrusted_clients(bool enabled);
-      void set_reject_untrusted_clients_switch(RejectUntrustedClientsSwitch *sw) { reject_untrusted_clients_switch_ = sw; }
+      void set_reject_untrusted_clients_switch(RejectUntrustedClientsSwitch *sw);
       void add_trusted_network(uint32_t network, uint32_t mask) { trusted_networks_.push_back({network, mask}); }
       void add_trusted_host(const std::string &host) { trusted_hosts_.push_back(host); }
       bool is_enabled() const;

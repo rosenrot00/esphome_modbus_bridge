@@ -476,6 +476,27 @@ namespace esphome
       return !this->trusted_networks_.empty() || !this->trusted_hosts_.empty();
     }
 
+    void ModbusBridgeComponent::set_protect_untrusted_reads_switch(ProtectUntrustedReadsSwitch *sw)
+    {
+      this->protect_untrusted_reads_switch_ = sw;
+      if (this->protect_untrusted_reads_switch_ != nullptr)
+        this->protect_untrusted_reads_switch_->publish_state(this->protect_reads_for_untrusted_clients_);
+    }
+
+    void ModbusBridgeComponent::set_protect_untrusted_writes_switch(ProtectUntrustedWritesSwitch *sw)
+    {
+      this->protect_untrusted_writes_switch_ = sw;
+      if (this->protect_untrusted_writes_switch_ != nullptr)
+        this->protect_untrusted_writes_switch_->publish_state(this->protect_writes_for_untrusted_clients_);
+    }
+
+    void ModbusBridgeComponent::set_reject_untrusted_clients_switch(RejectUntrustedClientsSwitch *sw)
+    {
+      this->reject_untrusted_clients_switch_ = sw;
+      if (this->reject_untrusted_clients_switch_ != nullptr)
+        this->reject_untrusted_clients_switch_->publish_state(this->reject_untrusted_clients_);
+    }
+
     void ModbusBridgeComponent::set_protect_reads_for_untrusted_clients(bool enabled)
     {
       this->protect_reads_for_untrusted_clients_ = enabled;
