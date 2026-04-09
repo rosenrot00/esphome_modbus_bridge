@@ -629,6 +629,8 @@ namespace esphome
       this->temp_buffer_.resize(MAX_TCP_READ);
       this->rtu_poll_interval_ms_ = this->rtu_inactivity_timeout_ms_ + 2;
       this->stop_uart_polling_();
+      this->tcp_client_count_ = 0;
+      this->tcp_clients_changed_cb_.call(0);
 
       // Periodic status log (debug only)
       this->set_interval("status_log", 10000, [this]()
