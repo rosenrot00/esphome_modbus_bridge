@@ -35,7 +35,6 @@ namespace esphome
     static constexpr size_t kMaxFramesPerLoop = 8;
     // Runtime toggle: preempt oldest same-IP connection when full
     static bool kPreemptSameIP = true;
-    static constexpr uint8_t kModbusExceptionIllegalFunction = 0x01;
 
     // Centralized caps
     static constexpr uint16_t MODBUS_TCP_LEN_CAP = 260;            // UID+PDU (LEN field)
@@ -51,7 +50,7 @@ namespace esphome
     static uint32_t g_drops_tcp_len = 0;
     static uint32_t g_drops_rtu_incomplete = 0;
     static uint32_t g_drop_untrusted_reads = 0;
-    static uint32_t g_block_untrusted_writes = 0;
+    static uint32_t g_drop_untrusted_writes = 0;
     static uint32_t g_reject_untrusted_clients = 0;
     static uint32_t g_timeouts = 0;
     static uint32_t g_clients_connected = 0;
@@ -173,18 +172,6 @@ namespace esphome
       out.push_back(mbap_len & 0xFF);
       out.push_back(rtu_resp[0]);                                      // UID
       out.insert(out.end(), rtu_resp.begin() + 1, rtu_resp.end() - 2); // PDU (FC+Data), drop CRC
-    }
-
-    static inline void build_tcp_exception_from_request(const uint8_t *request, uint8_t exception_code, std::vector<uint8_t> &out)
-    {
-      out.clear();
-      out.reserve(9);
-      out.insert(out.end(), request, request + 4); // TID + PID
-      out.push_back(0x00);
-      out.push_back(0x03);                         // LEN = UID + FC + EXC
-      out.push_back(request[6]);                  // UID
-      out.push_back(request[7] | 0x80);           // Exception FC
-      out.push_back(exception_code);
     }
 
     static inline bool is_modbus_write_fc_(uint8_t fc)
@@ -654,10 +641,10 @@ namespace esphome
             for (auto &cl : this->clients_) if (cl.fd >= 0) clients_active++;
         #endif
         ESP_LOGD(TAG,
-                "stats: in=%u out=%u drops(pid)=%u drops(tcp_len)=%u drops(rtu_incomplete)=%u drop_untrusted_reads=%u block_untrusted_writes=%u reject_untrusted_clients=%u timeouts=%u clients_active=%u clients_total=%u noslot=%u preempt=%u",
+                "stats: in=%u out=%u drops(pid)=%u drops(tcp_len)=%u drops(rtu_incomplete)=%u drop_untrusted_reads=%u drop_untrusted_writes=%u reject_untrusted_clients=%u timeouts=%u clients_active=%u clients_total=%u noslot=%u preempt=%u",
                 (unsigned)g_frames_in, (unsigned)g_frames_out, (unsigned)g_drops_pid,
                 (unsigned)g_drops_tcp_len, (unsigned)g_drops_rtu_incomplete,
-                (unsigned)g_drop_untrusted_reads, (unsigned)g_block_untrusted_writes,
+                (unsigned)g_drop_untrusted_reads, (unsigned)g_drop_untrusted_writes,
                 (unsigned)g_reject_untrusted_clients, (unsigned)g_timeouts,
                 (unsigned)clients_active, (unsigned)g_clients_connected,
                 (unsigned)g_noslot_events, (unsigned)g_preempt_events); });
@@ -851,13 +838,9 @@ namespace esphome
       }
       if (this->is_write_protection_effective_() && is_modbus_write_fc_(fc) && !this->is_client_slot_trusted_(client_fd))
       {
-        g_block_untrusted_writes++;
-        std::vector<uint8_t> tcp_response;
-        build_tcp_exception_from_request(data, kModbusExceptionIllegalFunction, tcp_response);
+        g_drop_untrusted_writes++;
         if (this->debug_)
-          ESP_LOGW(TAG, "Blocking untrusted Modbus write FC 0x%02X from client_id=%d", fc, client_fd);
-        this->send_to_client_(client_fd, tcp_response.data(), tcp_response.size());
-        g_frames_out++;
+          ESP_LOGW(TAG, "Dropping untrusted Modbus write FC 0x%02X from client_id=%d", fc, client_fd);
         return;
       }
 
@@ -1587,7 +1570,7 @@ namespace esphome
     uint32_t ModbusBridgeComponent::get_drops_tcp_len() const { return g_drops_tcp_len; }
     uint32_t ModbusBridgeComponent::get_drops_rtu_incomplete() const { return g_drops_rtu_incomplete; }
     uint32_t ModbusBridgeComponent::get_drop_untrusted_reads() const { return g_drop_untrusted_reads; }
-    uint32_t ModbusBridgeComponent::get_block_untrusted_writes() const { return g_block_untrusted_writes; }
+    uint32_t ModbusBridgeComponent::get_drop_untrusted_writes() const { return g_drop_untrusted_writes; }
     uint32_t ModbusBridgeComponent::get_reject_untrusted_clients() const { return g_reject_untrusted_clients; }
     uint32_t ModbusBridgeComponent::get_timeouts() const { return g_timeouts; }
     uint32_t ModbusBridgeComponent::get_clients_connected_total() const { return g_clients_connected; }
