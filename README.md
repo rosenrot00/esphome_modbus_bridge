@@ -197,10 +197,25 @@ modbus_bridge:
   # protect_untrusted_writes_switch:
   #   name: "Protect Untrusted Writes"
   # trusted_networks:
-  #   - 192.168.1.0/24          # local LAN stays trusted
+  #   - 192.168.69.0/24          # local LAN stays trusted
   #   - 10.0.0.5/32              # single trusted client
   # trusted_hosts:
   #   - otherhouse.example.org   # optional: trusted remote DynDNS/static host; resolved on new connections only
+  
+  # Example:
+  # reject_untrusted_clients: true
+  # protect_reads_for_untrusted_clients: true
+  # protect_writes_for_untrusted_clients: true
+  # reject_untrusted_clients_switch:
+  #   name: "Reject Untrusted Clients"
+  # protect_untrusted_reads_switch:
+  #   name: "Protect Untrusted Reads"
+  # protect_untrusted_writes_switch:
+  #   name: "Protect Untrusted Writes"
+  # trusted_networks:
+  #   - 192.168.69.0/24
+  # trusted_hosts:
+  #   - otherhouse.example.org
 
   # Event: triggered whenever number of TCP clients changes
   on_tcp_clients_changed:
@@ -337,11 +352,11 @@ sensor:
       return (int) id(mb_bridge).get_drop_untrusted_reads();
 
   - platform: template
-    name: "Untrusted Write Blocks"
+    name: "Untrusted Write Drops"
     accuracy_decimals: 0
     update_interval: 10s
     lambda: |-
-      return (int) id(mb_bridge).get_block_untrusted_writes();
+      return (int) id(mb_bridge).get_drop_untrusted_writes();
 
   - platform: template
     name: "Untrusted Client Rejects"
