@@ -49,6 +49,7 @@ namespace esphome
     static uint32_t g_drops_pid = 0;
     static uint32_t g_drops_tcp_len = 0;
     static uint32_t g_drops_rtu_incomplete = 0;
+    static uint32_t g_drops_rtu_crc = 0;
     static uint32_t g_drop_untrusted_reads = 0;
     static uint32_t g_drop_untrusted_writes = 0;
     static uint32_t g_reject_untrusted_clients = 0;
@@ -643,9 +644,10 @@ namespace esphome
             for (auto &cl : this->clients_) if (cl.fd >= 0) clients_active++;
         #endif
         ESP_LOGD(TAG,
-                "stats: in=%u out=%u drops(pid)=%u drops(tcp_len)=%u drops(rtu_incomplete)=%u drop_untrusted_reads=%u drop_untrusted_writes=%u reject_untrusted_clients=%u timeouts=%u clients_active=%u clients_total=%u noslot=%u preempt=%u",
+                "stats: in=%u out=%u drops(pid)=%u drops(tcp_len)=%u drops(rtu_incomplete)=%u drops(rtu_crc)=%u drop_untrusted_reads=%u drop_untrusted_writes=%u reject_untrusted_clients=%u timeouts=%u clients_active=%u clients_total=%u noslot=%u preempt=%u",
                 (unsigned)g_frames_in, (unsigned)g_frames_out, (unsigned)g_drops_pid,
                 (unsigned)g_drops_tcp_len, (unsigned)g_drops_rtu_incomplete,
+                (unsigned)g_drops_rtu_crc,
                 (unsigned)g_drop_untrusted_reads, (unsigned)g_drop_untrusted_writes,
                 (unsigned)g_reject_untrusted_clients, (unsigned)g_timeouts,
                 (unsigned)clients_active, (unsigned)g_clients_connected,
@@ -1478,9 +1480,18 @@ namespace esphome
           ESP_LOGD(TAG, "RTU recv (stable %u polls, %d bytes): %s",
                    (unsigned)pending.stable_polls, (int)current_size, debug_output.c_str());
         }
-        if (current_size < 3)
+        if (current_size < 5)
         {
-          ESP_LOGW(TAG, "Invalid RTU response (<3 bytes) – dropping");
+          INC(g_drops_rtu_incomplete);
+          ESP_LOGW(TAG, "Invalid RTU response (<5 bytes) – dropping");
+          this->finish_current_and_send_next_();
+          return;
+        }
+        if (!this->validate_rtu_crc_(pending.response))
+        {
+          INC(g_drops_rtu_crc);
+          ESP_LOGW(TAG, "RTU CRC mismatch. Dropping response. client_id=%d bytes=%s",
+                   pending.client_fd, to_hex(pending.response).c_str());
           this->finish_current_and_send_next_();
           return;
         }
@@ -1537,6 +1548,29 @@ namespace esphome
       data.push_back((crc >> 8) & 0xFF);
     }
 
+    bool ModbusBridgeComponent::validate_rtu_crc_(const std::vector<uint8_t> &data) const
+    {
+      if (data.size() < 4)
+        return false;
+
+      const size_t payload_len = data.size() - 2;
+      const uint16_t calculated = modbus_crc(data.data(), payload_len);
+      uint16_t received = 0;
+
+      if (this->crc_bytes_swapped_)
+      {
+        received = (static_cast<uint16_t>(data[payload_len]) << 8) |
+                   static_cast<uint16_t>(data[payload_len + 1]);
+      }
+      else
+      {
+        received = static_cast<uint16_t>(data[payload_len]) |
+                   (static_cast<uint16_t>(data[payload_len + 1]) << 8);
+      }
+
+      return calculated == received;
+    }
+
     void ModbusBridgeComponent::set_debug(bool debug)
     {
       this->debug_ = debug;
@@ -1571,6 +1605,7 @@ namespace esphome
     uint32_t ModbusBridgeComponent::get_drops_pid() const { return g_drops_pid; }
     uint32_t ModbusBridgeComponent::get_drops_tcp_len() const { return g_drops_tcp_len; }
     uint32_t ModbusBridgeComponent::get_drops_rtu_incomplete() const { return g_drops_rtu_incomplete; }
+    uint32_t ModbusBridgeComponent::get_drops_rtu_crc() const { return g_drops_rtu_crc; }
     uint32_t ModbusBridgeComponent::get_drop_untrusted_reads() const { return g_drop_untrusted_reads; }
     uint32_t ModbusBridgeComponent::get_drop_untrusted_writes() const { return g_drop_untrusted_writes; }
     uint32_t ModbusBridgeComponent::get_reject_untrusted_clients() const { return g_reject_untrusted_clients; }

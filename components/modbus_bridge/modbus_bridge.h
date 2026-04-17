@@ -137,6 +137,7 @@ namespace esphome
       uint32_t get_drops_pid() const;
       uint32_t get_drops_tcp_len() const;
       uint32_t get_drops_rtu_incomplete() const;
+      uint32_t get_drops_rtu_crc() const;
       uint32_t get_drop_untrusted_reads() const;
       uint32_t get_drop_untrusted_writes() const;
       uint32_t get_reject_untrusted_clients() const;
@@ -218,6 +219,7 @@ namespace esphome
       void start_uart_polling_();
       void stop_uart_polling_();
       void append_crc(std::vector<uint8_t> &data);
+      bool validate_rtu_crc_(const std::vector<uint8_t> &data) const;
       void initialize_tcp_server_();
       void poll_uart_response_();
       void check_tcp_sockets_();
