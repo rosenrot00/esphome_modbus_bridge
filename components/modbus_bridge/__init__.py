@@ -5,6 +5,8 @@ from esphome import automation, pins
 from esphome.components import switch, uart
 from esphome.const import CONF_ID, CONF_TRIGGER_ID
 
+AUTO_LOAD = ["switch"]
+
 CONF_TCP_PORT = "tcp_port"
 CONF_TCP_POLL_INTERVAL = "tcp_poll_interval"
 CONF_TCP_CLIENT_TIMEOUT = "tcp_client_timeout"
