@@ -889,24 +889,8 @@ namespace esphome
       if (this->pending_requests_.size() == 1)
       {
         PendingRequest &cur = this->pending_requests_.front();
-        if (this->debug_)
-        {
-          ESP_LOGD(TAG, "RTU send: %s client_id=%d", to_hex(cur.rtu_data).c_str(), cur.client_fd);
-        }
-        this->uart_->flush();
-        drain_uart_rx(this->uart_);
-        this->rs485_begin_tx_();
-        this->uart_->write_array(cur.rtu_data);
-        this->uart_->flush();
-        this->rs485_end_tx_();
-        cur.start_time = millis();
+        this->send_rtu_request_(cur);
         this->start_uart_polling_();
-        // Fire command-sent trigger (bridge-global)
-        {
-          uint8_t fc = pdu_fc_from_rtu_(cur.rtu_data);
-          uint16_t addr = start_addr_from_rtu_(cur.rtu_data);
-          this->rtu_send_cb_.call((int)fc, (int)addr); // Bridge-global event: RTU send
-        }
       }
     }
 
@@ -1332,8 +1316,8 @@ namespace esphome
 #endif
     }
 
-	    bool ModbusBridgeComponent::is_client_slot_connected_(int slot)
-	    {
+    bool ModbusBridgeComponent::is_client_slot_connected_(int slot)
+    {
       if (slot < 0 || slot >= (int)this->clients_.size())
         return false;
 #if defined(USE_ESP8266)
@@ -1342,8 +1326,8 @@ namespace esphome
       return this->clients_[slot].fd >= 0;
 #else
       return false;
-	#endif
-	    }
+#endif
+    }
 
     bool ModbusBridgeComponent::is_client_slot_trusted_(int slot) const
     {
@@ -1515,19 +1499,19 @@ namespace esphome
         return;
       }
 
-	      if (millis() - pending.start_time > this->rtu_response_timeout_ms_)
-	      {
-	        g_timeouts++;
-	        if (!pending.response.empty())
-	        {
-	          ESP_LOGW(TAG, "Incomplete RTU response (%d bytes): %s",
-	                   (int) pending.response.size(), to_hex(pending.response).c_str());
-	        }
-	        ESP_LOGW(TAG, "Modbus timeout: response incomplete. Dropping. client_id=%d", pending.client_fd);
-	        INC(g_drops_rtu_incomplete);
-	        this->fire_rtu_timeout_for_request_(pending);
-	        this->finish_current_and_send_next_();
-	        return;
+      if (millis() - pending.start_time > this->rtu_response_timeout_ms_)
+      {
+        g_timeouts++;
+        if (!pending.response.empty())
+        {
+          ESP_LOGW(TAG, "Incomplete RTU response (%d bytes): %s",
+                   (int)pending.response.size(), to_hex(pending.response).c_str());
+        }
+        ESP_LOGW(TAG, "Modbus timeout: response incomplete. Dropping. client_id=%d", pending.client_fd);
+        INC(g_drops_rtu_incomplete);
+        this->fire_rtu_timeout_for_request_(pending);
+        this->finish_current_and_send_next_();
+        return;
       }
 
       return;
