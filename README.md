@@ -4,6 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge for ESP82
 
 | Version | Changes |
 |---|---|
+| 2026.04.3 | Added CRC-validated RTU echo/noise stripping for known response types |
 | 2026.04.2 | Added RTU response CRC validation before forwarding TCP responses |
 | 2026.04.1 | Added optional protection for untrusted clients using `trusted_networks` and `trusted_hosts` |
 | 2026.03.3 | Increased the default `rtu_response_timeout` from 100 ms to 1000 ms |
@@ -35,6 +36,7 @@ The bridge listens on a configurable TCP port (default: 502) and expects standar
 - Configurable port, timeouts, and client limits
 - Supports RS-485 transceivers with separate `DE`/`RE` pins or one shared GPIO
 - Validates RTU response CRC before forwarding responses to TCP clients
+- Strips RTU echo/noise when a valid matching response frame can be recovered
 - Optional write protection for clients outside trusted networks or trusted DNS hosts
 - Optional read protection for clients outside trusted networks or trusted DNS hosts
 - Optional rejection of untrusted TCP clients before Modbus traffic starts
