@@ -203,6 +203,86 @@ namespace esphome
       }
     }
 
+    static inline bool request_expected_read_byte_count_(const PendingRequest &pending, uint8_t fc, uint8_t *byte_count)
+    {
+      if (byte_count == nullptr || pending.rtu_data.size() < 6)
+        return false;
+
+      const uint16_t quantity = (static_cast<uint16_t>(pending.rtu_data[4]) << 8) | pending.rtu_data[5];
+      if (quantity == 0)
+        return false;
+
+      uint32_t expected = 0;
+      switch (fc)
+      {
+      case 0x01:
+      case 0x02:
+        expected = (static_cast<uint32_t>(quantity) + 7U) / 8U;
+        break;
+      case 0x03:
+      case 0x04:
+        expected = static_cast<uint32_t>(quantity) * 2U;
+        break;
+      default:
+        return false;
+      }
+
+      if (expected > 255U)
+        return false;
+
+      *byte_count = static_cast<uint8_t>(expected);
+      return true;
+    }
+
+    static inline bool expected_known_rtu_response_length_(const PendingRequest &pending, size_t start, size_t *frame_len)
+    {
+      if (frame_len == nullptr || pending.rtu_data.size() < 2)
+        return false;
+
+      const auto &response = pending.response;
+      if (start >= response.size() || response.size() - start < 2)
+        return false;
+
+      const uint8_t expected_fc = pending.rtu_data[1];
+      const uint8_t response_fc = response[start + 1];
+
+      if (response_fc == (expected_fc | 0x80))
+      {
+        *frame_len = 5;
+        return true;
+      }
+
+      if (response_fc != expected_fc)
+        return false;
+
+      switch (response_fc)
+      {
+      case 0x01:
+      case 0x02:
+      case 0x03:
+      case 0x04:
+      {
+        if (response.size() - start < 3)
+          return false;
+        uint8_t expected_byte_count = 0;
+        if (!request_expected_read_byte_count_(pending, response_fc, &expected_byte_count))
+          return false;
+        if (response[start + 2] != expected_byte_count)
+          return false;
+        *frame_len = static_cast<size_t>(5U + expected_byte_count);
+        return true;
+      }
+      case 0x05:
+      case 0x06:
+      case 0x0F:
+      case 0x10:
+        *frame_len = 8;
+        return true;
+      default:
+        return false;
+      }
+    }
+
     void ProtectUntrustedReadsSwitch::write_state(bool state)
     {
       if (this->parent_ != nullptr)
@@ -1464,6 +1544,8 @@ namespace esphome
           ESP_LOGD(TAG, "RTU recv (stable %u polls, %d bytes): %s",
                    (unsigned)pending.stable_polls, (int)current_size, debug_output.c_str());
         }
+        this->normalize_rtu_response_(pending);
+        current_size = pending.response.size();
         if (current_size < 5)
         {
           INC(g_drops_rtu_incomplete);
@@ -1534,11 +1616,16 @@ namespace esphome
 
     bool ModbusBridgeComponent::validate_rtu_crc_(const std::vector<uint8_t> &data) const
     {
-      if (data.size() < 4)
+      return this->validate_rtu_crc_(data.data(), data.size());
+    }
+
+    bool ModbusBridgeComponent::validate_rtu_crc_(const uint8_t *data, size_t len) const
+    {
+      if (data == nullptr || len < 4)
         return false;
 
-      const size_t payload_len = data.size() - 2;
-      const uint16_t calculated = modbus_crc(data.data(), payload_len);
+      const size_t payload_len = len - 2;
+      const uint16_t calculated = modbus_crc(data, payload_len);
       uint16_t received = 0;
 
       if (this->crc_bytes_swapped_)
@@ -1553,6 +1640,47 @@ namespace esphome
       }
 
       return calculated == received;
+    }
+
+    bool ModbusBridgeComponent::normalize_rtu_response_(PendingRequest &pending)
+    {
+      auto &response = pending.response;
+      if (pending.rtu_data.size() < 2 || response.size() < 5)
+        return false;
+
+      const uint8_t expected_uid = pending.rtu_data[0];
+      for (size_t start = 0; start + 5 <= response.size(); ++start)
+      {
+        if (response[start] != expected_uid)
+          continue;
+
+        size_t frame_len = 0;
+        if (!expected_known_rtu_response_length_(pending, start, &frame_len))
+          continue;
+        if (frame_len < 5 || frame_len > response.size() - start)
+          continue;
+        if (!this->validate_rtu_crc_(response.data() + start, frame_len))
+          continue;
+
+        const size_t leading = start;
+        const size_t trailing = response.size() - start - frame_len;
+        if (leading == 0 && trailing == 0)
+          return false;
+
+        if (trailing > 0)
+          response.erase(response.begin() + start + frame_len, response.end());
+        if (leading > 0)
+          response.erase(response.begin(), response.begin() + leading);
+
+        if (this->debug_)
+        {
+          ESP_LOGD(TAG, "RTU echo/noise stripped: leading=%u trailing=%u response=%s",
+                   (unsigned)leading, (unsigned)trailing, to_hex(response).c_str());
+        }
+        return true;
+      }
+
+      return false;
     }
 
     void ModbusBridgeComponent::set_debug(bool debug)

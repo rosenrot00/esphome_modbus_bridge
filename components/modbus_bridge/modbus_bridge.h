@@ -220,6 +220,8 @@ namespace esphome
       void stop_uart_polling_();
       void append_crc(std::vector<uint8_t> &data);
       bool validate_rtu_crc_(const std::vector<uint8_t> &data) const;
+      bool validate_rtu_crc_(const uint8_t *data, size_t len) const;
+      bool normalize_rtu_response_(PendingRequest &pending);
       void initialize_tcp_server_();
       void poll_uart_response_();
       void check_tcp_sockets_();
