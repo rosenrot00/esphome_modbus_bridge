@@ -1,0 +1,113 @@
+# ============================================================================
+# Waveshare ESP32-S3-RS485-CAN — Modbus TCP-to-RTU Gateway
+# ============================================================================
+# Board: Waveshare ESP32-S3-RS485-CAN
+#   https://www.waveshare.com/wiki/ESP32-S3-RS485-CAN
+#   (also sold as "ESP32-S3-RS485-CAN Industrial Control Board" on
+#   AliExpress/resellers, DIN-rail mountable)
+#
+# Purpose: turns this board into a real Modbus TCP-to-RTU gateway (like an
+# Elfin EW11 in "Modbus TCP Gateway" mode) using the esphome_modbus_bridge
+# component. This does full protocol translation (MBAP header <-> RTU+CRC),
+# unlike a raw serial-over-TCP bridge (e.g. esphome-stream-server), which
+# just pipes bytes through and will NOT work with clients that speak
+# standard Modbus TCP (most Home Assistant integrations, pymodbus with the
+# default TCP framer, etc.).
+#
+# Board-specific pins (NOT in the official Waveshare wiki at time of
+# writing — found via github.com/syssi/esphome-yambms issue tracker,
+# cross-referenced against the board's WS_GPIO.h):
+#   UART TX            -> GPIO17
+#   UART RX             -> GPIO18
+#   RS485 flow control  -> GPIO21   (TXD1EN in Waveshare's own header)
+#   RS485 channel enable -> GPIO47  (must be driven HIGH or the RS485
+#                                    transceiver stays disabled and you'll
+#                                    get zero response from anything on the
+#                                    bus, even with correct wiring)
+#
+# Tested with: Marstek Venus C battery, Modbus RTU, 115200 8N1
+# Wiring notes:
+#   Power: this board is powered externally (DC 7-36V into its own power
+#   terminals), NOT parasitically from the Marstek's RS485 port. Use a
+#   separate PSU/adapter for the board itself.
+#   RS485 bus: only the A and B terminals are connected between this board
+#   and the Marstek battery. No shared ground/common wire is used between
+#   the two devices, and communication has been reliable without one over
+#   short cable runs. For longer runs or noisy environments, a shared
+#   reference ground is generally recommended by the RS485 spec, but wasn't
+#   necessary in this setup. If you get no response, try swapping A and B —
+#   labeling isn't always consistent between manufacturers.
+# ============================================================================
+
+esphome:
+  name: modbus-bridge
+  friendly_name: RS485 Modbus Bridge
+  # Ensures the RS485 channel-enable pin is driven high before anything
+  # else tries to use the bus.
+  on_boot:
+    priority: 600
+    then:
+      - switch.turn_on: rs485_enable
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  framework:
+    # esp-idf is required by esphome_modbus_bridge (not arduino)
+    type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Static IP recommended so the gateway's address never changes under
+  # whatever Modbus client (Home Assistant, etc.) you point at it.
+  manual_ip:
+    static_ip: 192.168.1.50      # <-- change to your network
+    gateway: 192.168.1.1         # <-- change to your network
+    subnet: 255.255.255.0
+  power_save_mode: none
+  fast_connect: true
+
+logger:
+  level: DEBUG
+
+api:
+
+ota:
+  - platform: esphome
+    # Recommended: set a password once your setup is stable.
+    # password: !secret ota_password
+
+# --- RS485 channel enable (GPIO47) ---
+# On this board, GPIO47 must be HIGH to enable the RS485 transceiver.
+# restore_mode: ALWAYS_ON re-asserts this on every boot automatically.
+switch:
+  - platform: gpio
+    pin: GPIO47
+    id: rs485_enable
+    internal: true
+    restore_mode: ALWAYS_ON
+
+uart:
+  - id: uart_bus
+    tx_pin: GPIO17
+    rx_pin: GPIO18
+    baud_rate: 115200          # match your RS485 device's settings
+    data_bits: 8
+    parity: NONE
+    stop_bits: 1
+    flow_control_pin: GPIO21   # RS485 DE/RE pin on this board
+
+# --- Modbus TCP-to-RTU gateway component ---
+# https://github.com/rosenrot00/esphome_modbus_bridge
+external_components:
+  - source:
+      type: git
+      url: https://github.com/rosenrot00/esphome_modbus_bridge
+    components: [modbus_bridge]
+    refresh: 0s
+
+modbus_bridge:
+  id: mb_bridge
+  uart_id: uart_bus
+  # Default TCP port is 502 (standard Modbus TCP port)
