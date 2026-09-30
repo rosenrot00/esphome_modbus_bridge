@@ -4,6 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge for ESP82
 
 | Version | Changes |
 |---|---|
+| 2026.09.3 | Fixed TCP automation safety, disconnect cleanup during DNS checks, and runtime client-limit changes |
 | 2026.09.2 | Improved echo/noise recovery, enforced RTU bus gaps, rechecked queued access permissions, and fixed TCP length-drop counting |
 | 2026.09.1 | Fixed TCP buffering, RTU echo handling and network recovery; added async trusted-host DNS and socket budgeting |
 | 2026.07.1 | Fixed request queue handling and improved untrusted-client, TCP-send, and RTU-response handling |

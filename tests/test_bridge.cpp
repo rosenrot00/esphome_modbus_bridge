@@ -413,6 +413,129 @@ static void test_automation_disables_bridge() {
   }
 }
 
+static void test_client_count_automation_disables_bridge() {
+  for (int event = 0; event < 5; ++event) {
+    Fixture f;
+    if (event == 3) {
+      f.bridge.add_trusted_host("home.example"); f.bridge.set_reject_untrusted_clients(true);
+    }
+    int fd = event == 0 ? -1 : f.connect();
+    bool fired = false;
+    f.bridge.add_on_tcp_clients_changed_callback([&f, &fired, event](int count) {
+      if ((event == 0 && count > 0) || (event != 0 && count == 0)) {
+        fired = true; f.bridge.set_enabled(false);
+      }
+    });
+    if (event == 0) f.connect();
+    else if (event == 1) { fake::now = 60001; f.poll(); }
+    else if (event == 2) { fake::connections[fd].connected = false; f.poll(); }
+    else if (event == 3) f.resolve(0);
+    else {
+      // Only the slot removed by lowering the limit remains connected.
+      int second = f.connect(0xC0A80121);
+      fake::connections[fd].connected = false;
+      f.bridge.set_tcp_allowed_clients(1); f.poll();
+      assert(!fake::connections[second].connected);
+    }
+    assert(fired && !f.bridge.is_enabled() && !f.bridge.running() && f.bridge.queued() == 0);
+  }
+}
+
+static void test_client_count_automation_reenables_bridge() {
+  Fixture f; int fd = f.connect();
+  f.bridge.add_on_tcp_clients_changed_callback([&f](int count) {
+    if (count == 0) { f.bridge.set_enabled(false); f.bridge.set_enabled(true); }
+  });
+  fake::now = 60001; f.poll();
+  assert(f.bridge.is_enabled() && !f.bridge.running() && !fake::connections[fd].connected);
+  f.network_tick(); fd = f.connect();
+  f.incoming(fd, request(1)); f.poll(); assert(f.bridge.active());
+}
+
+static void test_dns_pending_disconnect_frees_slots() {
+  Fixture f;
+  f.bridge.add_trusted_network(0xC0A80100, 0xFFFFFF00);
+  f.bridge.add_trusted_host("home.example"); f.bridge.set_reject_untrusted_clients(true);
+  int first = f.connect(0xCB007109), second = f.connect(0xCB00710A);
+  assert(f.bridge.pending(0) && f.bridge.pending(1));
+  fake::connections[first].connected = false; fake::connections[second].connected = false;
+  int local = f.connect();
+  assert(fake::connections[local].connected && f.bridge.resolving());
+  f.incoming(local, request(1)); f.poll();
+  assert(f.bridge.active_tid() == 1 && f.uart.tx.size() == 1);
+}
+
+static void test_dns_pending_buffer_preserves_requests() {
+  Fixture f; f.bridge.add_trusted_host("home.example");
+  f.bridge.set_reject_untrusted_clients(true);
+  int remote = f.connect(0xCB007109); const auto req = request(1);
+  f.incoming(remote, req);
+  for (int i = 0; i < 4; ++i) f.poll();
+  assert(fake::connections[remote].rx.empty() && f.bridge.buffered() == req.size() && f.uart.tx.empty());
+  f.resolve(0xCB007109); f.poll();
+  assert(fake::connections[remote].rx.empty() && f.bridge.active_tid() == 1);
+}
+
+static void test_dns_pending_disconnect_after_data() {
+  Fixture f;
+  f.bridge.add_trusted_network(0xC0A80100, 0xFFFFFF00);
+  f.bridge.add_trusted_host("home.example"); f.bridge.set_reject_untrusted_clients(true);
+  int first = f.connect(0xCB007109), second = f.connect(0xCB00710A);
+  f.incoming(first, request(1)); f.incoming(second, request(2));
+  fake::connections[first].connected = false; fake::connections[second].connected = false;
+  f.poll(); // Drain bytes preceding EOF, but never dispatch them before authorization.
+  int local = f.connect();
+  assert(fake::connections[local].connected && f.bridge.resolving() && f.uart.tx.empty());
+  f.incoming(local, request(3)); f.poll(); assert(f.bridge.active_tid() == 3);
+}
+
+static void test_dns_pending_buffer_is_bounded() {
+  Fixture f; f.bridge.add_trusted_host("home.example"); f.bridge.set_reject_untrusted_clients(true);
+  int remote = f.connect(0xCB007109);
+  for (int i = 0; i < 50; ++i) f.incoming(remote, request(i));
+  for (int i = 0; i < 3; ++i) f.poll();
+  assert(!fake::connections[remote].connected && f.uart.tx.empty() && f.bridge.queued() == 0);
+}
+
+static void test_runtime_client_limit_changes() {
+  Fixture f; f.bridge.set_tcp_allowed_clients(8);
+  std::vector<int> clients;
+  for (int i = 0; i < 8; ++i) {
+    clients.push_back(f.connect(0xC0A80120 + i));
+    assert(fake::connections[clients.back()].connected);
+  }
+  int excess = f.connect(0xC0A80140); assert(!fake::connections[excess].connected);
+  f.incoming(clients[6], request(1)); f.poll();
+  f.incoming(clients[7], request(2)); f.poll();
+  f.incoming(clients[0], request(3)); f.poll(); assert(f.bridge.queued() == 3);
+  f.bridge.set_tcp_allowed_clients(2); f.poll();
+  for (int i = 2; i < 8; ++i) assert(!fake::connections[clients[i]].connected);
+  assert(f.bridge.queued() == 2 && f.bridge.active_tid() == 1);
+  f.receive(with_crc({1,4,2,0,42}), 20); f.advance(25);
+  assert(fake::connections[clients[6]].tx.empty() && f.bridge.active_tid() == 3);
+  f.receive(with_crc({1,4,2,0,43}), 40);
+  assert(f.bridge.queued() == 0 && fake::connections[clients[0]].tx[1] == 3);
+  f.bridge.set_tcp_allowed_clients(8);
+  int replacement = f.connect(0xC0A80141);
+  assert(fake::connections[replacement].connected && f.bridge.queued() == 0);
+}
+
+static void test_client_limit_changed_by_automation() {
+  for (bool on_send : {false, true}) {
+    Fixture f;
+    if (on_send) f.bridge.add_on_rtu_send_callback([&f](int, int) { f.bridge.set_tcp_allowed_clients(8); });
+    else f.bridge.add_on_tcp_clients_changed_callback([&f](int count) {
+      if (count == 1) f.bridge.set_tcp_allowed_clients(8);
+    });
+    int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
+    assert(f.bridge.active());
+    f.poll();
+    for (int i = 1; i < 8; ++i) {
+      int next = f.connect(0xC0A80120 + i); assert(fake::connections[next].connected);
+    }
+  }
+}
+
 int main() {
   test_tcp_buffer(); test_tcp_fragments(); test_echo_and_delayed_response();
   test_invalid_responses_keep_deadline(); test_valid_write_and_exception(); test_no_response_and_incomplete();
@@ -425,9 +548,13 @@ int main() {
   test_disable_cancels_scheduled_tx(); test_disconnect_before_scheduled_tx(); test_protection_rechecked_at_dispatch();
   test_protection_without_trust_rules(); test_active_request_not_cancelled_by_protection(); test_invalid_tcp_lengths_counted_once();
   test_trusted_priority_during_bus_gap(); test_disconnect_preserves_inflight_request(); test_automation_disables_bridge();
+  test_client_count_automation_disables_bridge(); test_client_count_automation_reenables_bridge();
+  test_dns_pending_disconnect_frees_slots(); test_dns_pending_buffer_preserves_requests();
+  test_dns_pending_disconnect_after_data(); test_dns_pending_buffer_is_bounded();
+  test_runtime_client_limit_changes(); test_client_limit_changed_by_automation();
 #ifdef USE_ESP32
-  puts("ESP32: 30 bridge regression tests passed");
+  puts("ESP32: 38 bridge regression tests passed");
 #else
-  puts("ESP8266: 30 bridge regression tests passed");
+  puts("ESP8266: 38 bridge regression tests passed");
 #endif
 }

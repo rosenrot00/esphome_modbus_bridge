@@ -135,6 +135,7 @@ namespace esphome
           allowed = 1;
         if (allowed > 8)
           allowed = 8;
+        // Resize client storage on the next TCP poll, not inside an automation.
         tcp_allowed_clients_ = allowed;
       }
       void set_crc_bytes_swapped(bool swapped) { crc_bytes_swapped_ = swapped; }

@@ -1320,7 +1320,7 @@ namespace esphome
         return;
       }
 
-      const size_t duplicate_idx = find_first_slot_(this->clients_.size(), [&](size_t idx)
+      const size_t duplicate_idx = find_first_slot_(std::min(allowed_clients, this->clients_.size()), [&](size_t idx)
       {
         auto &ex = this->clients_[idx];
         return ex.socket.connected() &&
@@ -1348,7 +1348,7 @@ namespace esphome
       // Ensure accumulator size tracks clients_ size and reserve capacity
       this->prepare_rx_accumulator_(this->rx_accu8266_, this->clients_.size(), kTcpAccuCap);
 
-      const size_t free_idx = find_first_slot_(this->clients_.size(), [&](size_t idx)
+      const size_t free_idx = find_first_slot_(std::min(allowed_clients, this->clients_.size()), [&](size_t idx)
       {
         return !this->clients_[idx].socket.connected();
       });
@@ -1567,14 +1567,31 @@ namespace esphome
         return;
       }
       const size_t allowed_clients = this->tcp_allowed_clients_;
+      const int server_socket = this->sock_;
+      const auto poll_valid = [this, server_socket, allowed_clients]() {
+        return this->enabled_ && this->sock_ == server_socket && this->tcp_allowed_clients_ == allowed_clients;
+      };
       this->handle_new_client_esp8266_(allowed_clients);
+      if (!poll_valid())
+        return;
 
       for (auto it = this->clients_.begin(); it != this->clients_.end();)
       {
+        const size_t idx = static_cast<size_t>(std::distance(this->clients_.begin(), it));
+        if (idx >= allowed_clients)
+        {
+          it->socket.stop();
+          it->disconnect_notified = true;
+          this->purge_client_(idx, &this->rx_accu8266_);
+          this->refresh_tcp_client_count_();
+          if (!poll_valid())
+            return;
+          ++it;
+          continue;
+        }
         if (!it->socket.connected())
         {
           // keep slot, log only once per transition
-          size_t idx = static_cast<size_t>(std::distance(this->clients_.begin(), it));
           if (!it->disconnect_notified)
           {
             ESP_LOGI(TAG, "TCP disconnect client_id=%u", (unsigned)idx);
@@ -1583,24 +1600,52 @@ namespace esphome
           it->socket.stop();
           this->purge_client_(idx, &this->rx_accu8266_);
           this->refresh_tcp_client_count_();
+          if (!poll_valid())
+            return;
           ++it;
           continue;
         }
 
         if (millis() - it->last_activity > this->tcp_client_timeout_ms_)
         {
-          size_t idx = static_cast<size_t>(std::distance(this->clients_.begin(), it));
           ESP_LOGW(TAG, "TCP timeout client_id=%u", (unsigned)idx);
           it->socket.stop();
           it->disconnect_notified = true;
           this->purge_client_(idx, &this->rx_accu8266_);
           this->refresh_tcp_client_count_();
+          if (!poll_valid())
+            return;
           ++it;
           continue;
         }
 
         const size_t client_fd = static_cast<size_t>(std::distance(this->clients_.begin(), it));
-        if (!this->finish_client_trust_check_(client_fd))
+        if (it->trust_pending && it->socket.available() > 0)
+        {
+          auto &accu = this->rx_accu8266_[client_fd];
+          const size_t room = kTcpAccuCap - accu.size();
+          const int received = it->socket.read(this->temp_buffer_.data(), std::min(this->temp_buffer_.size(), room + 1));
+          if (received > 0 && static_cast<size_t>(received) > room)
+          {
+            ESP_LOGW(TAG, "TCP trust-pending buffer full client_id=%u", (unsigned)client_fd);
+            it->socket.stop();
+            this->purge_client_(client_fd, &this->rx_accu8266_);
+            this->refresh_tcp_client_count_();
+            if (!poll_valid())
+              return;
+            ++it;
+            continue;
+          }
+          if (received > 0)
+          {
+            accu.insert(accu.end(), this->temp_buffer_.begin(), this->temp_buffer_.begin() + received);
+            it->last_activity = millis();
+          }
+        }
+        const bool trust_ready = this->finish_client_trust_check_(client_fd);
+        if (!poll_valid())
+          return;
+        if (!trust_ready)
         {
           ++it;
           continue;
@@ -1617,7 +1662,7 @@ namespace esphome
         // Also drain complete buffered frames when the peer sends no new bytes.
         this->handle_client_rx_chunk_(accu, static_cast<int>(client_fd), this->temp_buffer_.data(),
                                      r > 0 ? static_cast<size_t>(r) : 0, kTcpAccuCap);
-        if (!this->enabled_)
+        if (!poll_valid())
           return;
 
         ++it;
@@ -1633,7 +1678,6 @@ namespace esphome
       {
         return; // Skip accept/read logic while disabled
       }
-      this->prepare_rx_accumulator_(this->rx_accu_, this->clients_.size(), kTcpAccuCap);
       if (this->sock_ < 0)
       {
         for (auto &v : this->rx_accu_)
@@ -1642,6 +1686,13 @@ namespace esphome
       }
 
       const size_t allowed_clients = this->tcp_allowed_clients_;
+      const int server_socket = this->sock_;
+      const auto poll_valid = [this, server_socket, allowed_clients]() {
+        return this->enabled_ && this->sock_ == server_socket && this->tcp_allowed_clients_ == allowed_clients;
+      };
+      if (this->clients_.size() < allowed_clients)
+        this->clients_.resize(allowed_clients);
+      this->prepare_rx_accumulator_(this->rx_accu_, this->clients_.size(), kTcpAccuCap);
 
       fd_set read_fds;
       FD_ZERO(&read_fds);
@@ -1657,11 +1708,12 @@ namespace esphome
         {
           if (c.fd >= 0)
           { // over the configured limit → close
-            if (idx < this->rx_accu_.size())
-              this->rx_accu_[idx].clear();
+            this->purge_client_(idx, &this->rx_accu_);
             close(c.fd);
             c.fd = -1;
             this->refresh_tcp_client_count_();
+            if (!poll_valid())
+              return;
           }
           continue;
         }
@@ -1674,9 +1726,42 @@ namespace esphome
             close(c.fd);
             c.fd = -1;
             this->refresh_tcp_client_count_();
+            if (!poll_valid())
+              return;
             continue;
           }
-          if (!this->finish_client_trust_check_(idx))
+          if (c.trust_pending)
+          {
+            // Buffer without dispatching so EOF remains visible even after the peer sent data.
+            auto &accu = this->rx_accu_[idx];
+            const size_t room = kTcpAccuCap - accu.size();
+            const int received = recv(c.fd, this->temp_buffer_.data(), std::min(this->temp_buffer_.size(), room + 1), 0);
+            const bool overflow = received > 0 && static_cast<size_t>(received) > room;
+            if (overflow || received == 0 ||
+                (received < 0 && errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR))
+            {
+              if (overflow)
+                ESP_LOGW(TAG, "TCP trust-pending buffer full client_id=%zu", idx);
+              else
+                ESP_LOGI(TAG, "TCP disconnect while trust pending client_id=%zu", idx);
+              this->purge_client_(idx, &this->rx_accu_);
+              close(c.fd);
+              c.fd = -1;
+              this->refresh_tcp_client_count_();
+              if (!poll_valid())
+                return;
+              continue;
+            }
+            if (received > 0)
+            {
+              accu.insert(accu.end(), this->temp_buffer_.begin(), this->temp_buffer_.begin() + received);
+              c.last_activity = now;
+            }
+          }
+          const bool trust_ready = this->finish_client_trust_check_(idx);
+          if (!poll_valid())
+            return;
+          if (!trust_ready)
             continue;
           FD_SET(c.fd, &read_fds);
           if (c.fd > maxfd)
@@ -1692,6 +1777,8 @@ namespace esphome
 
       if (FD_ISSET(this->sock_, &read_fds))
         this->handle_new_client_esp32_(allowed_clients);
+      if (!poll_valid())
+        return;
 
       for (size_t i = 0; i < allowed_clients; ++i)
       {
@@ -1711,6 +1798,8 @@ namespace esphome
             close(c.fd);
             c.fd = -1;
             this->refresh_tcp_client_count_();
+            if (!poll_valid())
+              return;
             continue;
           }
           if (r < 0)
@@ -1722,6 +1811,8 @@ namespace esphome
               close(c.fd);
               c.fd = -1;
               this->refresh_tcp_client_count_();
+              if (!poll_valid())
+                return;
               continue;
             }
           }
@@ -1730,7 +1821,7 @@ namespace esphome
         }
         this->handle_client_rx_chunk_(accu, static_cast<int>(i), this->temp_buffer_.data(),
                                      r > 0 ? static_cast<size_t>(r) : 0, kTcpAccuCap);
-        if (!this->enabled_)
+        if (!poll_valid())
           return;
       }
 #endif

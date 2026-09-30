@@ -21,6 +21,17 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+inline void checked_fd_set(int fd, fd_set *set) {
+  assert(fd >= 0 && fd < FD_SETSIZE); FD_SET(fd, set);
+}
+inline int checked_fd_isset(int fd, const fd_set *set) {
+  assert(fd >= 0 && fd < FD_SETSIZE); return FD_ISSET(fd, set);
+}
+#undef FD_SET
+#undef FD_ISSET
+#define FD_SET(fd, set) checked_fd_set(fd, set)
+#define FD_ISSET(fd, set) checked_fd_isset(fd, set)
+
 namespace fake {
 inline uint32_t now = 0;
 inline uint32_t sub_ms = 0;
@@ -62,10 +73,14 @@ inline int accept(int, sockaddr *address, socklen_t *) {
 }
 inline int recv(int fd, void *data, size_t len, int) {
   auto &c = connections[fd];
-  if (!c.connected) return 0;
-  if (c.rx.empty()) { errno = EAGAIN; return -1; }
+  if (c.rx.empty()) {
+    if (!c.connected) return 0;
+    errno = EAGAIN; return -1;
+  }
   size_t n = std::min(len, c.rx.size());
-  for (size_t i = 0; i < n; ++i) { static_cast<uint8_t *>(data)[i] = c.rx.front(); c.rx.pop_front(); }
+  for (size_t i = 0; i < n; ++i) {
+    static_cast<uint8_t *>(data)[i] = c.rx.front(); c.rx.pop_front();
+  }
   return static_cast<int>(n);
 }
 inline int send(int fd, const void *data, size_t len, int) {
@@ -240,11 +255,11 @@ public:
   WiFiClient() = default;
   explicit WiFiClient(int value) : fd(value) {}
   operator bool() const { return fd >= 0; }
-  bool connected() { return fd >= 0 && fake::connections[fd].connected; }
+  bool connected() { return fd >= 0 && (fake::connections[fd].connected || !fake::connections[fd].rx.empty()); }
   int available() { return fd < 0 ? 0 : fake::connections[fd].rx.size(); }
   int read(uint8_t *data, size_t size) { return (fake::recv)(fd, data, size, 0); }
   size_t write(const uint8_t *data, size_t size) { int n = (fake::send)(fd, data, size, 0); return n > 0 ? n : 0; }
-  void stop() { if (fd >= 0) (fake::close)(fd); }
+  void stop() { if (fd >= 0) (fake::close)(fd); fd = -1; }
   void setNoDelay(bool) {}
   void setTimeout(unsigned) {}
   IPAddress remoteIP() { return {fake::connections[fd].ip}; }
