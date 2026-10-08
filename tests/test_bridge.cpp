@@ -17,6 +17,7 @@ public:
   bool trusted(size_t slot = 0) const { return clients_[slot].trusted; }
   bool active() const { return rtu_request_active_; }
   uint32_t frame_gap_us() const { return rtu_frame_gap_us_; }
+  size_t rtu_buffered() const { return pending_requests_.empty() ? 0 : pending_requests_.front().response.size(); }
   size_t buffered(size_t slot = 0) const {
 #ifdef USE_ESP32
     return rx_accu_[slot].size();
@@ -243,6 +244,136 @@ static void test_partial_noisy_response() {
   assert(f.bridge.queued() == 0 && fake::connections[fd].tx.size() == 11);
 }
 
+static void test_delayed_short_response_prefix() {
+  for (uint32_t baud : {9600U,19200U,115200U}) {
+    for (uint8_t fc : {uint8_t(1), uint8_t(2), uint8_t(3), uint8_t(4),
+                       uint8_t(5), uint8_t(6), uint8_t(0x0F), uint8_t(0x10)}) {
+      for (size_t prefix : {size_t(1), size_t(2)}) {
+        for (bool noisy : {false, true}) {
+          Fixture f(baud); int fd = f.connect(); auto req = request(1,fc);
+          if (fc == 5) { req[10] = 0xFF; req[11] = 0; }
+          if (fc == 0x0F) { req[5] = 8; req.insert(req.end(), {1,1}); }
+          if (fc == 0x10) { req[5] = 9; req.insert(req.end(), {2,0,42}); }
+          f.incoming(fd, req); f.poll();
+          const auto reply = fc <= 2 ? with_crc({1,fc,1,1})
+                             : fc <= 4 ? with_crc({1,fc,2,0,42})
+                             : fc <= 6 ? f.uart.tx.front()
+                             : with_crc({1,fc,0,18,0,1});
+          std::vector<uint8_t> capture;
+          if (noisy) capture = {0x55,0xAA};
+          capture.insert(capture.end(), reply.begin(), reply.begin() + prefix);
+          const auto drops = f.bridge.get_drops_rtu_incomplete();
+          f.receive(capture, 10); f.settle(20); f.settle(34);
+          assert(f.bridge.active() && f.bridge.rtu_buffered() == capture.size());
+          assert(fake::connections[fd].tx.empty() && f.bridge.get_drops_rtu_incomplete() == drops);
+          f.receive({reply.begin() + prefix, reply.end()}, 50);
+          if (!noisy) assert(f.bridge.queued() == 0); // Clean frames still complete immediately.
+          f.settle(60);
+          std::vector<uint8_t> expected{0,1,0,0,0,uint8_t(reply.size() - 2)};
+          expected.insert(expected.end(), reply.begin(), reply.end() - 2);
+          assert(f.bridge.queued() == 0 && fake::connections[fd].tx == expected);
+        }
+      }
+    }
+  }
+}
+
+static void test_delayed_exception_prefix() {
+  for (uint8_t fc : {uint8_t(3), uint8_t(0x10)}) {
+    for (size_t prefix : {size_t(1), size_t(2)}) {
+      Fixture f; int fd = f.connect(); f.incoming(fd, request(1,fc)); f.poll();
+      const auto reply = with_crc({1,uint8_t(fc | 0x80),2});
+      f.receive({reply.begin(), reply.begin() + prefix}, 10); f.settle(20);
+      assert(f.bridge.active() && f.bridge.rtu_buffered() == prefix);
+      f.receive({reply.begin() + prefix, reply.end()}, 50);
+      assert(f.bridge.queued() == 0);
+      assert((fake::connections[fd].tx == std::vector<uint8_t>{0,1,0,0,0,3,1,uint8_t(fc | 0x80),2}));
+    }
+  }
+}
+
+static void test_single_uid_after_echo_and_noise() {
+  Fixture f; int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
+  auto capture = f.uart.tx.front(); capture.insert(capture.end(), {0x55,0xAA,1});
+  f.receive(capture, 10); f.settle(20);
+  assert(f.bridge.active() && f.bridge.rtu_buffered() == capture.size());
+  const auto reply = with_crc({1,4,2,0,42});
+  f.receive({reply.begin() + 1, reply.end()}, 50); f.settle(60);
+  assert(f.bridge.queued() == 0);
+  assert((fake::connections[fd].tx == std::vector<uint8_t>{0,1,0,0,0,5,1,4,2,0,42}));
+}
+
+static void test_short_prefix_does_not_hide_valid_frame() {
+  Fixture f; int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
+  f.receive({1}, 10); f.settle(20);
+  const auto reply = with_crc({1,4,2,0,42});
+  auto capture = reply; capture.back() ^= 1;
+  capture.insert(capture.end(), reply.begin(), reply.end()); capture.push_back(1);
+  const auto drops = f.bridge.get_drops_rtu_crc();
+  f.receive(capture, 50); f.settle(60);
+  assert(f.bridge.queued() == 0 && f.bridge.get_drops_rtu_crc() == drops);
+  assert((fake::connections[fd].tx == std::vector<uint8_t>{0,1,0,0,0,5,1,4,2,0,42}));
+}
+
+static void test_short_prefix_keeps_original_timeout_and_resets() {
+  for (bool noisy : {false, true}) {
+    Fixture f; int fd = f.connect();
+    f.incoming(fd, request(1)); f.incoming(fd, request(2)); f.poll();
+    const auto timeouts = f.bridge.get_timeouts();
+    const auto drops = f.bridge.get_drops_rtu_incomplete();
+    const std::vector<uint8_t> capture = noisy ? std::vector<uint8_t>{0x55,1} : std::vector<uint8_t>{1};
+    f.receive(capture, 900); f.settle(920);
+    assert(f.bridge.rtu_buffered() == capture.size());
+    f.advance(1000); f.bridge.poll_uart_response_();
+    assert(f.bridge.active_tid() == 1 && f.bridge.get_timeouts() == timeouts);
+    f.advance(1001); f.bridge.poll_uart_response_();
+    assert(f.bridge.active_tid() == 2 && f.uart.tx.size() == 2 && f.bridge.rtu_buffered() == 0);
+    assert(f.bridge.get_timeouts() == timeouts + 1 && f.bridge.get_drops_rtu_incomplete() == drops + 1);
+    f.receive(with_crc({1,4,2,0,42}), 1020);
+    assert(f.bridge.queued() == 0);
+    assert((fake::connections[fd].tx == std::vector<uint8_t>{0,2,0,0,0,5,1,4,2,0,42}));
+  }
+}
+
+static void test_unrelated_short_noise_is_discarded() {
+  Fixture f; int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
+  const auto drops = f.bridge.get_drops_rtu_incomplete();
+  f.receive({0x55}, 10); f.settle(20);
+  assert(f.bridge.active() && f.bridge.rtu_buffered() == 0);
+  assert(f.bridge.get_drops_rtu_incomplete() == drops + 1);
+  f.receive(with_crc({1,4,2,0,42}), 50);
+  assert(f.bridge.queued() == 0 && fake::connections[fd].tx.size() == 11);
+}
+
+static void test_short_prefix_still_requires_matching_fc_and_crc() {
+  for (bool wrong_fc : {false, true}) {
+    Fixture f; int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
+    f.receive({1}, 10); f.settle(20);
+    auto invalid = with_crc({1,uint8_t(wrong_fc ? 3 : 4),2,0,42});
+    if (!wrong_fc) invalid.back() ^= 0x80;
+    const auto drops = wrong_fc ? f.bridge.get_drops_rtu_mismatch() : f.bridge.get_drops_rtu_crc();
+    f.receive({invalid.begin() + 1, invalid.end()}, 50); f.settle(60);
+    assert(f.bridge.active() && fake::connections[fd].tx.empty());
+    const auto after = wrong_fc ? f.bridge.get_drops_rtu_mismatch() : f.bridge.get_drops_rtu_crc();
+    assert(after == drops + 1 && f.bridge.rtu_buffered() == 0);
+    f.receive(with_crc({1,4,2,0,42}), 80);
+    assert(f.bridge.queued() == 0 && fake::connections[fd].tx.size() == 11);
+  }
+}
+
+static void test_short_prefix_capture_remains_bounded() {
+  Fixture f; int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
+  std::vector<uint8_t> capture(kMaxRtuCapture - 1, 0x55); capture.push_back(1);
+  const auto drops = f.bridge.get_drops_rtu_incomplete();
+  f.receive(capture, 10); f.settle(20);
+  assert(f.bridge.rtu_buffered() == kMaxRtuCapture && f.bridge.get_drops_rtu_incomplete() == drops);
+  f.receive({4}, 50);
+  assert(f.bridge.active() && f.bridge.rtu_buffered() == 0);
+  assert(f.bridge.get_drops_rtu_incomplete() == drops + 1);
+  f.receive(with_crc({1,4,2,0,42}), 80);
+  assert(f.bridge.queued() == 0 && fake::connections[fd].tx.size() == 11);
+}
+
 static void test_bad_crc_candidate_and_trailing_noise() {
   Fixture f; int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
   const auto reply = with_crc({1,4,2,0,42});
@@ -268,6 +399,16 @@ static void test_unknown_function_unchanged() {
   f.receive(reply, 10); f.settle(17);
   assert(f.bridge.queued() == 0);
   assert((fake::connections[fd].tx == std::vector<uint8_t>{0,1,0,0,0,6,1,0x41,0xCA,0xFE,0,0x42}));
+}
+
+static void test_unknown_function_crc_ending_in_uid() {
+  Fixture f; int fd = f.connect(); f.incoming(fd, request(1,0x41)); f.poll();
+  const auto reply = with_crc({1,0x41,0,19});
+  assert(reply.back() == 1);
+  f.receive(reply, 10); f.settle(20);
+  std::vector<uint8_t> expected{0,1,0,0,0,uint8_t(reply.size() - 2)};
+  expected.insert(expected.end(), reply.begin(), reply.end() - 2);
+  assert(f.bridge.queued() == 0 && fake::connections[fd].tx == expected);
 }
 
 static void test_bus_gap_and_immediate_tcp_reply() {
@@ -542,6 +683,10 @@ int main() {
   test_network_recovery(); test_dns_pending_and_existing_client(); test_dns_failure_and_cache();
   test_dns_shutdown_and_reuse(); test_dns_multiple_and_immediate();
   test_echo_before_exception(); test_stale_write_before_matching_reply(); test_partial_noisy_response();
+  test_delayed_short_response_prefix(); test_delayed_exception_prefix(); test_single_uid_after_echo_and_noise();
+  test_short_prefix_does_not_hide_valid_frame(); test_short_prefix_keeps_original_timeout_and_resets();
+  test_unrelated_short_noise_is_discarded(); test_unknown_function_crc_ending_in_uid();
+  test_short_prefix_still_requires_matching_fc_and_crc(); test_short_prefix_capture_remains_bounded();
   test_bad_crc_candidate_and_trailing_noise(); test_partial_noise_keeps_original_timeout(); test_unknown_function_unchanged();
   test_bus_gap_and_immediate_tcp_reply(); test_bus_gap_for_new_request_and_late_bytes(); test_bus_gap_micros_wrap();
   test_bus_gap_with_parity_and_two_stop_bits();
@@ -553,8 +698,8 @@ int main() {
   test_dns_pending_disconnect_after_data(); test_dns_pending_buffer_is_bounded();
   test_runtime_client_limit_changes(); test_client_limit_changed_by_automation();
 #ifdef USE_ESP32
-  puts("ESP32: 38 bridge regression tests passed");
+  puts("ESP32: 47 bridge regression tests passed");
 #else
-  puts("ESP8266: 38 bridge regression tests passed");
+  puts("ESP8266: 47 bridge regression tests passed");
 #endif
 }

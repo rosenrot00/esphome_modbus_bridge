@@ -2256,20 +2256,30 @@ namespace esphome
     {
       incomplete = false;
       auto &response = pending.response;
-      if (pending.rtu_data.size() < 2 || response.size() < 2)
+      if (pending.rtu_data.size() < 2 || response.empty())
         return false;
 
       const uint8_t expected_uid = pending.rtu_data[0];
-      for (size_t start = 0; start + 2 <= response.size(); ++start)
+      const bool known_response_shape = has_known_response_shape_(pending.rtu_data[1]);
+      for (size_t start = 0; start < response.size(); ++start)
       {
         if (response[start] != expected_uid)
           continue;
+
+        // A trailing UID can be the first byte of the next UART batch.
+        // Leave unknown-function framing unchanged when no layout is known.
+        if (response.size() - start == 1)
+        {
+          if (known_response_shape)
+            incomplete = true;
+          continue;
+        }
 
         size_t frame_len = 0;
         if (!expected_known_rtu_response_length_(pending, start, &frame_len))
         {
           if (response.size() - start < 3 && response[start + 1] == pending.rtu_data[1] &&
-              has_known_response_shape_(pending.rtu_data[1]))
+              known_response_shape)
             incomplete = true;
           continue;
         }
