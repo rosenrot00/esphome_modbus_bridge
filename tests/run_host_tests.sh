@@ -10,9 +10,15 @@ for header in esphome/core/component.h esphome/core/hal.h esphome/core/log.h \
   mkdir -p "$build/include/$(dirname "$header")"
   printf '#include "host_runtime.h"\n' > "$build/include/$header"
 done
+mkdir -p "$build/include/esphome/components/modbus"
+printf '#include "host_modbus.h"\n' > "$build/include/esphome/components/modbus/modbus.h"
 for platform in ESP32 ESP8266; do
   "${CXX:-c++}" -std=c++17 -g -O1 -fsanitize=address,undefined \
     -Wno-deprecated-declarations -DUSE_"$platform" -I"$build/include" -I"$root/tests" \
     "$root/tests/test_bridge.cpp" -o "$build/test_$platform"
   "$build/test_$platform"
+  "${CXX:-c++}" -std=c++20 -g -O1 -fsanitize=address,undefined \
+    -Wno-deprecated-declarations -DUSE_"$platform" -DUSE_MODBUS_BRIDGE_HUB \
+    -I"$build/include" -I"$root/tests" "$root/tests/test_bridge.cpp" -o "$build/test_${platform}_hub"
+  "$build/test_${platform}_hub"
 done

@@ -24,6 +24,9 @@ CONF_PROTECT_UNTRUSTED_WRITES_SWITCH = "protect_untrusted_writes_switch"
 CONF_REJECT_UNTRUSTED_CLIENTS_SWITCH = "reject_untrusted_clients_switch"
 CONF_TRUSTED_NETWORKS = "trusted_networks"
 CONF_TRUSTED_HOSTS = "trusted_hosts"
+CONF_MODBUS_ID = "modbus_id"
+# Declare the client hub type without loading Modbus for UART-only configurations.
+ModbusClientHub = cg.esphome_ns.namespace("modbus").class_("ModbusClientHub")
 
 CONF_ON_RTU_SEND = "on_rtu_send"
 CONF_ON_RTU_RECEIVE = "on_rtu_receive"
@@ -78,20 +81,36 @@ def _allow_shared_de_re_pin(config):
     return config
 
 
+def _validate_backend(config):
+    cv.has_exactly_one_key("uart_id", CONF_MODBUS_ID)(config)
+    if CONF_MODBUS_ID in config:
+        cv.require_esphome_version(2026, 9, 1)(config)
+        for key in (CONF_DE_PIN, CONF_RE_PIN, CONF_CRC_BYTES_SWAPPED, CONF_RTU_RESPONSE_TIMEOUT):
+            if key in config:
+                raise cv.Invalid(f"{key} is only available with uart_id; configure the shared Modbus hub instead")
+    else:
+        config = dict(config)
+        config.setdefault(CONF_RTU_RESPONSE_TIMEOUT, 1000)
+        config.setdefault(CONF_CRC_BYTES_SWAPPED, False)
+    return config
+
+
 BASE_SCHEMA = cv.All(
+    _validate_backend,
     _allow_shared_de_re_pin,
     cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(ModbusBridgeComponent),
-        cv.Required("uart_id"): cv.use_id(uart.UARTComponent),
+        cv.Optional("uart_id"): cv.use_id(uart.UARTComponent),
+        cv.Optional(CONF_MODBUS_ID): cv.use_id(ModbusClientHub),
         cv.Optional(CONF_DE_PIN): pins.gpio_output_pin_schema,
         cv.Optional(CONF_RE_PIN): pins.gpio_output_pin_schema,
         cv.Optional(CONF_TCP_PORT, default=502): cv.port,
         cv.Optional(CONF_TCP_POLL_INTERVAL, default=50): cv.positive_int,
         cv.Optional(CONF_TCP_CLIENT_TIMEOUT, default=60000): cv.positive_int,
-        cv.Optional(CONF_RTU_RESPONSE_TIMEOUT, default=1000): cv.int_range(min=10),
+        cv.Optional(CONF_RTU_RESPONSE_TIMEOUT): cv.int_range(min=10),
         cv.Optional(CONF_TCP_ALLOWED_CLIENTS, default=2): cv.int_range(min=1, max=8),
-        cv.Optional(CONF_CRC_BYTES_SWAPPED, default=False): cv.boolean,
+        cv.Optional(CONF_CRC_BYTES_SWAPPED): cv.boolean,
         cv.Optional(CONF_ENABLED, default=True): cv.boolean,
         cv.Optional(CONF_PROTECT_READS_FOR_UNTRUSTED_CLIENTS, default=False): cv.boolean,
         cv.Optional(CONF_PROTECT_WRITES_FOR_UNTRUSTED_CLIENTS, default=False): cv.boolean,
@@ -172,14 +191,19 @@ async def to_code(config):
         var = cg.new_Pvariable(conf[CONF_ID])
         await cg.register_component(var, conf)
 
-        uart_comp = await cg.get_variable(conf["uart_id"])
-        cg.add(var.set_uart_id(uart_comp))
+        if CONF_MODBUS_ID in conf:
+            cg.add_define("USE_MODBUS_BRIDGE_HUB")
+            hub = await cg.get_variable(conf[CONF_MODBUS_ID])
+            cg.add(var.set_modbus_id(hub))
+        else:
+            uart_comp = await cg.get_variable(conf["uart_id"])
+            cg.add(var.set_uart_id(uart_comp))
+            cg.add(var.set_rtu_response_timeout(conf[CONF_RTU_RESPONSE_TIMEOUT]))
+            cg.add(var.set_crc_bytes_swapped(conf[CONF_CRC_BYTES_SWAPPED]))
         cg.add(var.set_tcp_port(conf[CONF_TCP_PORT]))
         cg.add(var.set_tcp_poll_interval(conf[CONF_TCP_POLL_INTERVAL]))
         cg.add(var.set_tcp_client_timeout(conf[CONF_TCP_CLIENT_TIMEOUT]))
-        cg.add(var.set_rtu_response_timeout(conf[CONF_RTU_RESPONSE_TIMEOUT]))
         cg.add(var.set_tcp_allowed_clients(conf[CONF_TCP_ALLOWED_CLIENTS]))
-        cg.add(var.set_crc_bytes_swapped(conf[CONF_CRC_BYTES_SWAPPED]))
         cg.add(var.set_enabled(conf[CONF_ENABLED]))
         cg.add(var.set_protect_reads_for_untrusted_clients(conf[CONF_PROTECT_READS_FOR_UNTRUSTED_CLIENTS]))
         cg.add(var.set_protect_writes_for_untrusted_clients(conf[CONF_PROTECT_WRITES_FOR_UNTRUSTED_CLIENTS]))

@@ -242,23 +242,18 @@ namespace esphome
       return (static_cast<uint16_t>(header[0]) << 8) | header[1];
     }
 
-    // Build Modbus TCP response from an RTU response
-    static inline void build_tcp_from_rtu(const PendingRequest &pending,
-                                          const std::vector<uint8_t> &rtu_resp,
-                                          std::vector<uint8_t> &out)
+    static inline void build_tcp_response_(const PendingRequest &pending, uint8_t uid,
+                                           const uint8_t *pdu, size_t pdu_length,
+                                           std::vector<uint8_t> &out)
     {
-      if (rtu_resp.size() < 3)
-        return; // invalid RTU frame (uid + fc + crc)
-      const size_t current_size = rtu_resp.size();
-      const uint16_t pdu_length = static_cast<uint16_t>(current_size - 3); // FC + Data
       const uint16_t mbap_len = static_cast<uint16_t>(pdu_length + 1);     // UID + PDU
       out.clear();
-      out.reserve(6 + 2 + 1 + pdu_length);                       // MBAP + LEN + UID + PDU
+      out.reserve(6 + mbap_len);
       out.insert(out.end(), pending.header, pending.header + 4); // TID + PID
       out.push_back((mbap_len >> 8) & 0xFF);
       out.push_back(mbap_len & 0xFF);
-      out.push_back(rtu_resp[0]);                                      // UID
-      out.insert(out.end(), rtu_resp.begin() + 1, rtu_resp.end() - 2); // PDU (FC+Data), drop CRC
+      out.push_back(uid);
+      out.insert(out.end(), pdu, pdu + pdu_length);
     }
 
     static inline bool is_modbus_read_only_fc_(uint8_t fc)
@@ -290,22 +285,6 @@ namespace esphome
         return true;
       default:
         return false;
-      }
-    }
-
-    static inline bool write_response_echo_matches_request_(const PendingRequest &pending, const uint8_t *response, size_t len)
-    {
-      switch (pending.rtu_data[1])
-      {
-      case 0x05:
-      case 0x06:
-      case 0x0F:
-      case 0x10:
-        // Standard write responses echo start address plus value or quantity.
-        return pending.rtu_data.size() >= 6 && len >= 6 &&
-               std::equal(pending.rtu_data.begin() + 2, pending.rtu_data.begin() + 6, response + 2);
-      default:
-        return true;
       }
     }
 
@@ -386,6 +365,38 @@ namespace esphome
         return true;
       default:
         return false;
+      }
+    }
+
+    // Shared by raw-UART frames and CRC-checked PDUs delivered by the native hub.
+    static bool response_pdu_matches_request_(const PendingRequest &pending, const uint8_t *pdu, size_t len)
+    {
+      if (pending.rtu_data.size() < 2 || len < 2)
+        return false;
+      const uint8_t fc = pending.rtu_data[1];
+      if (pdu[0] == (fc | 0x80))
+        return len == 2;
+      if (pdu[0] != fc)
+        return false;
+      switch (fc)
+      {
+      case 0x01:
+      case 0x02:
+      case 0x03:
+      case 0x04:
+      {
+        uint8_t count = 0;
+        return request_expected_read_byte_count_(pending, fc, &count) &&
+               pdu[1] == count && len == static_cast<size_t>(count) + 2;
+      }
+      case 0x05:
+      case 0x06:
+      case 0x0F:
+      case 0x10:
+        return len == 5 && pending.rtu_data.size() >= 6 &&
+               std::equal(pending.rtu_data.begin() + 2, pending.rtu_data.begin() + 6, pdu + 1);
+      default:
+        return true; // Unknown function codes remain transparent.
       }
     }
 
@@ -598,6 +609,11 @@ namespace esphome
       if (accu_opt && idx < accu_opt->size())
         (*accu_opt)[idx].clear();
 
+#ifdef USE_MODBUS_BRIDGE_HUB
+      if (this->rtu_request_active_ && !this->hub_request_sent_ && !this->pending_requests_.empty() &&
+          this->pending_requests_.front().client_fd == static_cast<int>(idx))
+        this->cancel_unsent_hub_request_();
+#endif
       auto it = this->pending_requests_.begin();
       if (this->rtu_request_active_ && it != this->pending_requests_.end() && it->client_fd == static_cast<int>(idx))
       {
@@ -794,6 +810,10 @@ namespace esphome
     void ModbusBridgeComponent::set_protect_reads_for_untrusted_clients(bool enabled)
     {
       this->protect_reads_for_untrusted_clients_ = enabled;
+#ifdef USE_MODBUS_BRIDGE_HUB
+      if (enabled)
+        this->cancel_unsent_hub_request_();
+#endif
       if (this->protect_untrusted_reads_switch_ != nullptr && this->protect_untrusted_reads_switch_->state != enabled)
         this->protect_untrusted_reads_switch_->publish_state(enabled);
     }
@@ -801,6 +821,10 @@ namespace esphome
     void ModbusBridgeComponent::set_protect_writes_for_untrusted_clients(bool enabled)
     {
       this->protect_writes_for_untrusted_clients_ = enabled;
+#ifdef USE_MODBUS_BRIDGE_HUB
+      if (enabled)
+        this->cancel_unsent_hub_request_();
+#endif
       if (this->protect_untrusted_writes_switch_ != nullptr && this->protect_untrusted_writes_switch_->state != enabled)
         this->protect_untrusted_writes_switch_->publish_state(enabled);
     }
@@ -876,38 +900,46 @@ namespace esphome
     {
       this->sock_ = -1;
 
-      // --- Safety guards: UART must be set and baud > 0 ---
-      if (this->uart_ == nullptr)
+      if (this->uart_ != nullptr)
       {
-        ESP_LOGE(TAG, "UART not set – aborting setup");
-        return;
-      }
-      const uint32_t _br_setup_guard = this->uart_->get_baud_rate();
-      if (_br_setup_guard == 0)
-      {
-        ESP_LOGE(TAG, "UART baud rate is 0 – aborting setup");
-        return;
-      }
+        const uint32_t baud = this->uart_->get_baud_rate();
+        if (baud == 0)
+        {
+          ESP_LOGE(TAG, "UART baud rate is 0 - aborting setup");
+          return;
+        }
+        this->char_time_us_ = calc_char_time_us_(baud);
+        // Above 19200 baud Modbus recommends a fixed 1.75 ms inter-frame gap.
+        const uint32_t bits_per_char = std::max<uint32_t>(11, 1 + this->uart_->get_data_bits() +
+            this->uart_->get_stop_bits() + (this->uart_->get_parity() != uart::UART_CONFIG_PARITY_NONE));
+        this->rtu_frame_gap_us_ = baud > 19200 ? 1750 :
+            static_cast<uint32_t>((bits_per_char * 3500000ULL + baud - 1) / baud);
+        this->rtu_inactivity_timeout_ms_ = static_cast<uint32_t>(std::ceil((3.5 * 11.0 * 1000.0) / baud) + 1);
+        this->rtu_poll_interval_ms_ = this->rtu_inactivity_timeout_ms_ + 2;
 
-      // Cache char time; setup optional RS-485 pin
-      this->char_time_us_ = calc_char_time_us_(_br_setup_guard);
-      // Above 19200 baud Modbus recommends a fixed 1.75 ms inter-frame gap.
-      const uint32_t bits_per_char = std::max<uint32_t>(11, 1 + this->uart_->get_data_bits() +
-          this->uart_->get_stop_bits() + (this->uart_->get_parity() != uart::UART_CONFIG_PARITY_NONE));
-      this->rtu_frame_gap_us_ = _br_setup_guard > 19200 ? 1750 :
-          static_cast<uint32_t>((bits_per_char * 3500000ULL + _br_setup_guard - 1) / _br_setup_guard);
-
-      // Optional RS-485 DE and /RE pins
-      // Drive both with the same level so it works if they are separate GPIOs or the same GPIO is used for both.
-      if (this->de_pin_ != nullptr)
-      {
-        this->de_pin_->setup();              // output
-        this->de_pin_->digital_write(false); // RX mode (DE low)
+        // DE and /RE may share one GPIO; low selects receive mode for both.
+        if (this->de_pin_ != nullptr)
+        {
+          this->de_pin_->setup();
+          this->de_pin_->digital_write(false);
+        }
+        if (this->re_pin_ != nullptr)
+        {
+          this->re_pin_->setup();
+          this->re_pin_->digital_write(false);
+        }
       }
-      if (this->re_pin_ != nullptr)
+      else
       {
-        this->re_pin_->setup();              // output
-        this->re_pin_->digital_write(false); // RX mode (/RE low)
+#ifdef USE_MODBUS_BRIDGE_HUB
+        if (this->parent_ != nullptr)
+          ESP_LOGI(TAG, "Using shared ESPHome Modbus client hub");
+        else
+#endif
+        {
+          ESP_LOGE(TAG, "UART or Modbus hub not set - aborting setup");
+          return;
+        }
       }
 
       this->set_interval("tcp_server_and_network_check", 1000, [this]()
@@ -935,13 +967,10 @@ namespace esphome
       this->set_interval("tcp_poll", this->tcp_poll_interval_ms_, [this]()
                          { this->check_tcp_sockets_(); });
 
-      // t3.5 ≈ 3.5 character times, conservatively 11 bits/char
-      this->rtu_inactivity_timeout_ms_ = static_cast<uint32_t>(std::ceil((3.5 * 11.0 * 1000.0) / _br_setup_guard) + 1);
       // Use a fixed-size scratch buffer for TCP reads (independent of UART RX size)
       // One full Modbus-TCP frame (MBAP + LEN)
       this->temp_buffer_.resize(MAX_TCP_READ);
       this->tcp_response_buffer_.reserve(MAX_TCP_READ);
-      this->rtu_poll_interval_ms_ = this->rtu_inactivity_timeout_ms_ + 2;
       this->stop_uart_polling_();
       this->tcp_client_count_ = 0;
       this->tcp_clients_changed_cb_.call(0);
@@ -1083,6 +1112,11 @@ namespace esphome
 
       this->pending_requests_.clear();
       this->rtu_request_active_ = false;
+#ifdef USE_MODBUS_BRIDGE_HUB
+      if (this->parent_ != nullptr)
+        this->clear_tx_queue_for_device();
+      this->hub_request_sent_ = false;
+#endif
       this->cancel_timeout("modbus_tx");
       this->stop_uart_polling_();
       this->drain_uart_rx_();
@@ -1906,6 +1940,17 @@ namespace esphome
         this->pending_requests_.pop_front();
       this->rtu_request_active_ = false;
       this->stop_uart_polling_();
+#ifdef USE_MODBUS_BRIDGE_HUB
+      if (this->parent_ != nullptr)
+      {
+        this->hub_request_sent_ = false;
+        // Submit the next TCP transaction after the hub's callback/sweep has
+        // finished, keeping native command lifetimes separate even for duplicates.
+        if (!this->pending_requests_.empty())
+          this->set_timeout("modbus_tx", 0, [this]() { this->dispatch_next_request_(); });
+        return !this->pending_requests_.empty();
+      }
+#endif
       return this->dispatch_next_request_();
     }
 
@@ -1923,6 +1968,28 @@ namespace esphome
           this->pending_requests_.pop_front();
           continue;
         }
+
+#ifdef USE_MODBUS_BRIDGE_HUB
+        if (this->parent_ != nullptr)
+        {
+          this->rtu_request_active_ = true;
+          this->hub_request_sent_ = false;
+          // Preserve transparent unit-0 passthrough, including devices that
+          // answer it, instead of treating these requests as fire-and-forget.
+          modbus::CommandOptions options{};
+          options.allow_broadcast_read = true;
+          options.expect_broadcast_write_response = true;
+          if (!this->parent_->queue_pdu(next.rtu_data[0],
+                  std::span<const uint8_t>(next.rtu_data.data() + 1, next.rtu_data.size() - 3), this, options))
+          {
+            ESP_LOGW(TAG, "Modbus hub refused request. Dropping. client_id=%d tid=0x%04X",
+                     next.client_fd, transaction_id_from_header_(next.header));
+            this->finish_current_and_send_next_();
+            return false;
+          }
+          return true;
+        }
+#endif
 
         // Observe/drain late bytes before starting a new transaction. UART APIs
         // do not expose their wire timestamp, so use the last observed activity.
@@ -1955,6 +2022,119 @@ namespace esphome
       return false;
     }
 
+#ifdef USE_MODBUS_BRIDGE_HUB
+    bool ModbusBridgeComponent::hub_request_matches_(std::span<const uint8_t> request_pdu) const
+    {
+      if (!this->rtu_request_active_ || this->pending_requests_.empty())
+        return false;
+      const auto &frame = this->pending_requests_.front().rtu_data;
+      return frame.size() == request_pdu.size() + 3 &&
+             std::equal(request_pdu.begin(), request_pdu.end(), frame.begin() + 1);
+    }
+
+    void ModbusBridgeComponent::cancel_unsent_hub_request_()
+    {
+      if (this->parent_ == nullptr || !this->rtu_request_active_ || this->hub_request_sent_)
+        return;
+      this->clear_tx_queue_for_device();
+      this->rtu_request_active_ = false;
+      this->set_timeout("modbus_tx", 0, [this]() { this->dispatch_next_request_(); });
+    }
+
+    void ModbusBridgeComponent::on_sent(std::span<const uint8_t> request_pdu)
+    {
+      if (!this->hub_request_matches_(request_pdu))
+        return;
+      this->hub_request_sent_ = true;
+      auto &req = this->pending_requests_.front();
+      req.start_time = millis();
+      if (this->debug_)
+        ESP_LOGD(TAG, "RTU send (hub): %s client_id=%d tid=0x%04X",
+                 to_hex(req.rtu_data).c_str(), req.client_fd, transaction_id_from_header_(req.header));
+      const int fc = pdu_fc_from_rtu_(req.rtu_data);
+      const int addr = start_addr_from_rtu_(req.rtu_data);
+      this->rtu_send_cb_.call(fc, addr);
+    }
+
+    void ModbusBridgeComponent::on_response(std::span<const uint8_t> request_pdu, std::span<const uint8_t> response_pdu)
+    {
+      if (!this->hub_request_sent_ || !this->hub_request_matches_(request_pdu))
+        return;
+      auto &req = this->pending_requests_.front();
+      if (this->debug_)
+        ESP_LOGD(TAG, "RTU recv (hub): UID: %u, PDU: %s", (unsigned)req.rtu_data[0],
+                 to_hex(response_pdu.data(), response_pdu.size()).c_str());
+      // The hub already checked the wire CRC and unit ID. Still check byte count
+      // and write acknowledgements before attaching this TCP transaction ID.
+      if (response_pdu.size() > MODBUS_TCP_LEN_CAP - 1 ||
+          !response_pdu_matches_request_(req, response_pdu.data(), response_pdu.size()))
+      {
+        INC(g_drops_rtu_mismatch);
+        ESP_LOGW(TAG, "Modbus hub response does not match request. Dropping. client_id=%d tid=0x%04X",
+                 req.client_fd, transaction_id_from_header_(req.header));
+      }
+      else
+        this->forward_response_(req.rtu_data[0], response_pdu.data(), response_pdu.size());
+      this->finish_current_and_send_next_();
+    }
+
+    void ModbusBridgeComponent::on_error(std::span<const uint8_t> request_pdu, modbus::ExceptionCode exception_code)
+    {
+      if (request_pdu.empty())
+        return;
+      const uint8_t response[] = {static_cast<uint8_t>(request_pdu[0] | 0x80), static_cast<uint8_t>(exception_code)};
+      this->on_response(request_pdu, response);
+    }
+
+    bool ModbusBridgeComponent::on_no_response(std::span<const uint8_t> request_pdu)
+    {
+      if (this->hub_request_matches_(request_pdu))
+      {
+        const auto &req = this->pending_requests_.front();
+        INC(g_timeouts);
+        ESP_LOGW(TAG, "Modbus hub timeout: no valid response. client_id=%d tid=0x%04X",
+                 req.client_fd, transaction_id_from_header_(req.header));
+        this->fire_rtu_timeout_for_request_(req);
+        this->finish_current_and_send_next_();
+      }
+      return false; // The TCP client, not the hub, decides whether to retry.
+    }
+
+    void ModbusBridgeComponent::on_not_sent(std::span<const uint8_t> request_pdu)
+    {
+      if (!this->hub_request_matches_(request_pdu))
+        return;
+      const auto &req = this->pending_requests_.front();
+      ESP_LOGW(TAG, "Modbus hub request cancelled before transmission. client_id=%d tid=0x%04X",
+               req.client_fd, transaction_id_from_header_(req.header));
+      this->finish_current_and_send_next_();
+    }
+#endif
+
+    void ModbusBridgeComponent::forward_response_(uint8_t uid, const uint8_t *pdu, size_t pdu_len)
+    {
+      const auto &pending = this->pending_requests_.front();
+      const int fc = pdu_fc_from_rtu_(pending.rtu_data);
+      const int addr = start_addr_from_rtu_(pending.rtu_data);
+      const uint16_t tid = transaction_id_from_header_(pending.header);
+      const uint32_t elapsed = millis() - pending.start_time;
+      if (this->is_client_slot_connected_(pending.client_fd))
+      {
+        auto &tcp_response = this->tcp_response_buffer_;
+        build_tcp_response_(pending, uid, pdu, pdu_len, tcp_response);
+        if (this->send_to_client_(pending.client_fd, tcp_response.data(), tcp_response.size()))
+        {
+          INC(g_frames_out);
+          if (this->debug_)
+            ESP_LOGD(TAG, "RTU->TCP TID: 0x%04X, LEN: %u, Response time: %ums",
+                     tid, static_cast<unsigned>(pdu_len + 1), static_cast<unsigned>(elapsed));
+        }
+      }
+      else if (this->debug_)
+        ESP_LOGD(TAG, "Discarding RTU response for disconnected client, TID: 0x%04X", tid);
+      this->rtu_receive_cb_.call(fc, addr);
+    }
+
     void ModbusBridgeComponent::fire_rtu_timeout_for_request_(const PendingRequest &req)
     {
       uint8_t fc = pdu_fc_from_rtu_(req.rtu_data);
@@ -1983,36 +2163,39 @@ namespace esphome
 
     size_t ModbusBridgeComponent::read_uart_response_bytes_(PendingRequest &req)
     {
-      size_t avail = this->uart_->available();
-      if (!avail)
+      size_t unread = this->uart_->available();
+      if (!unread)
         return 0;
 
-      const size_t remaining = req.response.size() < kMaxRtuCapture
-                                   ? kMaxRtuCapture - req.response.size()
-                                   : 0;
-      req.response.reserve(req.response.size() + std::min(avail, remaining));
+      uint8_t overflow_buffer[64];
       size_t discarded = 0;
-      bool received = false;
-      for (size_t i = 0; i < avail; ++i)
+      // Read only the initial availability snapshot; later bytes belong to the next poll.
+      while (unread > 0)
       {
-        uint8_t b;
-        if (this->uart_->read_byte(&b))
+        const size_t size = req.response.size();
+        const size_t remaining = size < kMaxRtuCapture ? kMaxRtuCapture - size : 0;
+        const size_t count = std::min(unread, remaining ? remaining : sizeof(overflow_buffer));
+        uint8_t *destination = overflow_buffer;
+        if (remaining)
         {
-          req.received_bytes = true;
-          received = true;
-          if (req.response.size() < kMaxRtuCapture)
-            req.response.push_back(b);
-          else
-            discarded++;
+          req.response.reserve(size + count);
+          req.response.resize(size + count);
+          destination = req.response.data() + size;
         }
-        else
+        if (!this->uart_->read_array(destination, count))
+        {
+          // A failed block read may have consumed bytes without reporting how many.
+          clear_rtu_response_(req);
+          ESP_LOGW(TAG, "UART read failed; discarding RTU capture. client_id=%d", req.client_fd);
           break;
+        }
+        if (!remaining)
+          discarded += count;
+        unread -= count;
       }
-      if (received)
-      {
-        this->last_bus_activity_us_ = micros();
-        this->bus_activity_seen_ = true;
-      }
+      req.received_bytes = true;
+      this->last_bus_activity_us_ = micros();
+      this->bus_activity_seen_ = true;
       return discarded;
     }
 
@@ -2138,32 +2321,7 @@ namespace esphome
           this->check_rtu_timeout_(pending);
           return;
         }
-        const uint8_t event_fc = pdu_fc_from_rtu_(pending.rtu_data);
-        const uint16_t event_addr = start_addr_from_rtu_(pending.rtu_data);
-        if (this->is_client_slot_connected_(pending.client_fd))
-        {
-          auto &tcp_response = this->tcp_response_buffer_;
-          build_tcp_from_rtu(pending, pending.response, tcp_response);
-          if (this->send_to_client_(pending.client_fd, tcp_response.data(), tcp_response.size()))
-          {
-            g_frames_out++;
-            if (this->debug_)
-            {
-              ESP_LOGD(TAG, "RTU->TCP TID: 0x%04X, LEN: %u, Response time: %ums",
-                       transaction_id_from_header_(pending.header),
-                       tcp_response.size() >= 6 ? static_cast<unsigned>((tcp_response[4] << 8) | tcp_response[5]) : 0U,
-                       static_cast<unsigned>(millis() - pending.start_time));
-            }
-          }
-        }
-        else if (this->debug_)
-        {
-          ESP_LOGD(TAG, "Discarding RTU response for disconnected client, TID: 0x%04X",
-                   transaction_id_from_header_(pending.header));
-        }
-        // Run automations only after all request data has been consumed. An
-        // automation may disable the bridge and clear pending_requests_.
-        this->rtu_receive_cb_.call((int)event_fc, (int)event_addr);
+        this->forward_response_(pending.response[0], pending.response.data() + 1, pending.response.size() - 3);
         this->finish_current_and_send_next_();
         return;
       }
@@ -2225,31 +2383,7 @@ namespace esphome
         return false;
       const uint8_t *response = pending.response.data() + start;
 
-      const uint8_t request_uid = pending.rtu_data[0];
-      const uint8_t request_fc = pending.rtu_data[1];
-      const uint8_t response_uid = response[0];
-      const uint8_t response_fc = response[1];
-
-      if (response_uid != request_uid)
-        return false;
-      if (response_fc != request_fc && response_fc != (request_fc | 0x80))
-        return false;
-
-      size_t expected_len = 0;
-      if (expected_known_rtu_response_length_(pending, start, &expected_len))
-      {
-        if (expected_len != len)
-          return false;
-        if (response_fc == (request_fc | 0x80))
-          return true;
-        return write_response_echo_matches_request_(pending, response, len);
-      }
-      if (has_known_response_shape_(request_fc))
-        return false;
-
-      // Unknown function codes stay transparent; after UID/FC and CRC checks,
-      // there is no response layout we can safely validate further.
-      return true;
+      return response[0] == pending.rtu_data[0] && response_pdu_matches_request_(pending, response + 1, len - 3);
     }
 
     bool ModbusBridgeComponent::normalize_rtu_response_(PendingRequest &pending, bool &incomplete)

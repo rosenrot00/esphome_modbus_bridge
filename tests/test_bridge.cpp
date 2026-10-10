@@ -18,6 +18,7 @@ public:
   bool active() const { return rtu_request_active_; }
   uint32_t frame_gap_us() const { return rtu_frame_gap_us_; }
   size_t rtu_buffered() const { return pending_requests_.empty() ? 0 : pending_requests_.front().response.size(); }
+  size_t rtu_capacity() const { return pending_requests_.front().response.capacity(); }
   size_t buffered(size_t slot = 0) const {
 #ifdef USE_ESP32
     return rx_accu_[slot].size();
@@ -29,9 +30,12 @@ public:
 
 struct Fixture {
   uart::UARTComponent uart;
+#ifdef USE_MODBUS_BRIDGE_HUB
+  modbus::ModbusClientHub hub;
+#endif
   TestBridge bridge;
   explicit Fixture(uint32_t baud_rate = 9600, uint8_t stop_bits = 1,
-                   uart::UARTParityOptions parity = uart::UART_CONFIG_PARITY_NONE) {
+                   uart::UARTParityOptions parity = uart::UART_CONFIG_PARITY_NONE, bool use_hub = false) {
     fake::now = 0;
     fake::sub_ms = 0;
     fake::connections.clear(); fake::accepts.clear(); fake::next_fd = 3;
@@ -41,7 +45,12 @@ struct Fixture {
     network::addresses = {}; network::addresses[0].value = 0xC0A80164;
     uart.baud_rate = baud_rate;
     uart.stop_bits = stop_bits; uart.parity = parity;
-    bridge.set_uart_id(&uart); bridge.setup();
+#ifdef USE_MODBUS_BRIDGE_HUB
+    if (use_hub) bridge.set_modbus_id(&hub);
+    else
+#endif
+      bridge.set_uart_id(&uart);
+    bridge.setup();
     network_tick();
   }
   void network_tick() { bridge.run_interval("tcp_server_and_network_check"); }
@@ -374,6 +383,104 @@ static void test_short_prefix_capture_remains_bounded() {
   assert(f.bridge.queued() == 0 && fake::connections[fd].tx.size() == 11);
 }
 
+static void test_uart_block_reads_complete_frames() {
+  for (uint8_t quantity : {uint8_t(1), uint8_t(125)}) {
+    Fixture f; int fd = f.connect(); auto req = request(1); req[11] = quantity;
+    f.incoming(fd, req); f.poll();
+    std::vector<uint8_t> reply{1,4,uint8_t(quantity * 2)};
+    for (size_t i = 0; i < size_t(quantity) * 2; ++i) reply.push_back(uint8_t(i));
+    reply = with_crc(reply);
+    const auto byte_calls = f.uart.read_byte_calls;
+    f.receive(reply, 10);
+    assert(f.uart.read_array_sizes == std::vector<size_t>{reply.size()});
+    assert(f.uart.read_byte_calls == byte_calls && f.uart.rx.empty());
+    assert(f.bridge.queued() == 0 && fake::connections[fd].tx.size() == reply.size() + 4);
+    const auto &tcp = fake::connections[fd].tx;
+    assert(std::equal(reply.begin(), reply.end() - 2, tcp.begin() + 6));
+  }
+}
+
+static void test_uart_block_appends_fragments_and_defers_new_bytes() {
+  Fixture f; int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
+  const auto reply = with_crc({1,4,2,0,42});
+  f.receive({}, 5); assert(f.uart.read_array_sizes.empty());
+  f.uart.after_read_array = [&]() { f.uart.rx.insert(f.uart.rx.end(), reply.begin() + 3, reply.end()); };
+  f.receive({reply.begin(), reply.begin() + 3}, 10);
+  assert(f.bridge.rtu_buffered() == 3 && f.uart.rx.size() == reply.size() - 3);
+  assert(f.uart.read_array_sizes == std::vector<size_t>{3} && fake::connections[fd].tx.empty());
+  f.receive({}, 11);
+  assert((f.uart.read_array_sizes == std::vector<size_t>{3, reply.size() - 3}));
+  assert(f.bridge.queued() == 0 && fake::connections[fd].tx.size() == 11);
+}
+
+static void test_uart_block_overflow_drains_only_snapshot() {
+  Fixture f; int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
+  const auto drops = f.bridge.get_drops_rtu_incomplete();
+  f.uart.after_read_array = [&]() { f.uart.rx.insert(f.uart.rx.end(), {0x55,0xAA,0xFF}); };
+  f.receive(std::vector<uint8_t>(kMaxRtuCapture + 130, 0x55), 10);
+  assert((f.uart.read_array_sizes == std::vector<size_t>{kMaxRtuCapture,64,64,2}));
+  assert(f.uart.rx.size() == 3 && f.bridge.rtu_buffered() == 0);
+  assert(f.bridge.active() && f.bridge.get_drops_rtu_incomplete() == drops + 1);
+  assert(fake::connections[fd].tx.empty());
+  assert(std::any_of(fake::logs.begin(), fake::logs.end(), [](const auto &s) {
+    return s.find("at least 130 discarded") != std::string::npos;
+  }));
+  f.receive(with_crc({1,4,2,0,42}), 80); f.settle(90);
+  assert(f.bridge.queued() == 0 && fake::connections[fd].tx.size() == 11);
+}
+
+static void test_uart_block_fragment_capacity_stays_bounded() {
+  Fixture f; int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
+  for (size_t count : {size_t(300), size_t(200), size_t(12)}) {
+    std::vector<uint8_t> chunk(count, 0x55); chunk.back() = 1;
+    f.receive(chunk, 10); f.settle(20);
+    assert(f.bridge.active() && f.bridge.rtu_capacity() <= kMaxRtuCapture);
+  }
+  assert(f.bridge.rtu_buffered() == kMaxRtuCapture);
+}
+
+static void test_uart_block_read_failure_discards_capture_and_recovers() {
+  for (size_t partial : {size_t(0), size_t(2), size_t(4)}) {
+    Fixture f; int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
+    const auto reply = with_crc({1,4,2,0,42});
+    f.receive({reply.begin(), reply.begin() + 3}, 10);
+    f.uart.fail_read_array_call = 2; f.uart.partial_read_bytes = partial;
+    f.receive({reply.begin() + 3, reply.end()}, 20);
+    assert(f.bridge.active() && f.bridge.rtu_buffered() == 0);
+    assert(fake::connections[fd].tx.empty() && f.uart.rx.size() == 4 - partial);
+    assert(std::any_of(fake::logs.begin(), fake::logs.end(), [](const auto &s) {
+      return s.find("UART read failed") != std::string::npos;
+    }));
+    f.receive(reply, 80); f.settle(90);
+    assert(f.bridge.queued() == 0 && fake::connections[fd].tx.size() == 11);
+  }
+}
+
+static void test_uart_block_read_failure_keeps_original_deadline() {
+  Fixture f; int fd = f.connect(); f.incoming(fd, request(1)); f.incoming(fd, request(2)); f.poll();
+  const auto timeouts = f.bridge.get_timeouts();
+  const auto reply = with_crc({1,4,2,0,42});
+  f.receive({reply.begin(), reply.begin() + 3}, 10);
+  f.uart.fail_read_array_call = 2; f.uart.partial_read_bytes = 2;
+  f.receive({reply.begin() + 3, reply.end()}, 990);
+  assert(f.bridge.active_tid() == 1 && f.uart.tx.size() == 1);
+  f.receive({}, 1001);
+  assert(f.bridge.active_tid() == 2 && f.uart.tx.size() == 1 && !f.bridge.active());
+  assert(f.bridge.get_timeouts() == timeouts + 1 && fake::connections[fd].tx.empty());
+  f.advance(1006); assert(f.bridge.active() && f.uart.tx.size() == 2);
+}
+
+static void test_uart_block_overflow_read_failure() {
+  Fixture f; int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
+  f.uart.fail_read_array_call = 2; f.uart.partial_read_bytes = 10;
+  f.receive(std::vector<uint8_t>(kMaxRtuCapture + 80, 0x55), 10);
+  assert((f.uart.read_array_sizes == std::vector<size_t>{kMaxRtuCapture,64}));
+  assert(f.bridge.active() && f.bridge.rtu_buffered() == 0 && f.uart.rx.size() == 70);
+  assert(fake::connections[fd].tx.empty());
+  f.receive(with_crc({1,4,2,0,42}), 80); f.settle(90);
+  assert(f.bridge.queued() == 0 && fake::connections[fd].tx.size() == 11);
+}
+
 static void test_bad_crc_candidate_and_trailing_noise() {
   Fixture f; int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
   const auto reply = with_crc({1,4,2,0,42});
@@ -677,6 +784,180 @@ static void test_client_limit_changed_by_automation() {
   }
 }
 
+#ifdef USE_MODBUS_BRIDGE_HUB
+struct LocalHubClient : modbus::ModbusClientDevice {
+  int received = 0;
+  void on_response(std::span<const uint8_t>, std::span<const uint8_t>) override { ++received; }
+};
+
+static void test_hub_interleaves_local_client() {
+  Fixture f(9600, 1, uart::UART_CONFIG_PARITY_NONE, true);
+  LocalHubClient local; local.set_parent(&f.hub);
+  const uint8_t pdu[] = {4,0,18,0,1};
+  f.hub.queue_pdu(1, pdu, &local);
+  int sent = 0; f.bridge.add_on_rtu_send_callback([&](int fc, int addr) {
+    assert(fc == 4 && addr == 18); ++sent;
+  });
+  int fd = f.connect(); f.incoming(fd, request(0x1234)); f.poll();
+  assert(f.hub.entries.size() == 2 && f.uart.tx.empty() && sent == 0);
+  f.hub.transmit(); f.hub.complete(modbus::ModbusClientHub::RESPONSE, {4,2,0,11});
+  assert(local.received == 1 && fake::connections[fd].tx.empty() && sent == 0);
+  f.hub.transmit(); f.hub.complete(modbus::ModbusClientHub::RESPONSE, {4,2,0,42});
+  assert(sent == 1 && f.bridge.queued() == 0 && f.uart.tx.empty());
+  assert((fake::connections[fd].tx == std::vector<uint8_t>{0x12,0x34,0,0,0,5,1,4,2,0,42}));
+  assert(f.bridge.intervals.count("modbus_rx_poll") == 0);
+}
+
+static void test_hub_identical_requests_have_separate_replies() {
+  Fixture f(9600, 1, uart::UART_CONFIG_PARITY_NONE, true);
+  int fd = f.connect(); f.incoming(fd, request(1)); f.incoming(fd, request(2)); f.poll();
+  assert(f.hub.entries.size() == 1);
+  f.hub.transmit(); f.hub.complete(modbus::ModbusClientHub::RESPONSE, {4,2,0,11});
+  assert(f.hub.entries.empty() && f.bridge.queued() == 1);
+  f.advance(50); assert(f.hub.entries.size() == 1);
+  f.hub.transmit(); f.hub.complete(modbus::ModbusClientHub::RESPONSE, {4,2,0,22});
+  const auto &tx = fake::connections[fd].tx;
+  assert(tx.size() == 22 && tx[1] == 1 && tx[10] == 11 && tx[12] == 2 && tx[21] == 22);
+}
+
+static void test_hub_multiple_units_and_clients() {
+  Fixture f(9600, 1, uart::UART_CONFIG_PARITY_NONE, true);
+  int a = f.connect(), b = f.connect(0xC0A80121);
+  auto second = request(2); second[6] = 7;
+  f.incoming(a, request(1)); f.incoming(b, second); f.poll();
+  f.hub.transmit(); f.hub.complete(modbus::ModbusClientHub::RESPONSE, {4,2,0,11});
+  f.advance(50); assert(f.hub.entries.front()->address == 7);
+  f.hub.transmit(); f.hub.complete(modbus::ModbusClientHub::RESPONSE, {4,2,0,22});
+  assert(fake::connections[a].tx[6] == 1 && fake::connections[a].tx[10] == 11);
+  assert(fake::connections[b].tx[6] == 7 && fake::connections[b].tx[10] == 22);
+}
+
+static void test_hub_owns_timeout_and_does_not_retry() {
+  Fixture f(9600, 1, uart::UART_CONFIG_PARITY_NONE, true);
+  int timeouts = 0; f.bridge.add_on_rtu_timeout_callback([&](int, int) { ++timeouts; });
+  int fd = f.connect(); f.incoming(fd, request(1)); f.incoming(fd, request(2)); f.poll();
+  f.advance(5000); assert(timeouts == 0 && f.bridge.active_tid() == 1);
+  f.hub.transmit(); f.advance(10000); assert(timeouts == 0);
+  uint32_t before = f.bridge.get_timeouts();
+  f.hub.complete(modbus::ModbusClientHub::TIMEOUT);
+  assert(timeouts == 1 && f.bridge.get_timeouts() == before + 1 && fake::connections[fd].tx.empty());
+  f.advance(10001); assert(f.bridge.active_tid() == 2 && f.hub.entries.size() == 1);
+}
+
+static void test_hub_validates_replies_and_forwards_exceptions() {
+  for (uint8_t fc : {uint8_t(4), uint8_t(6)}) {
+    Fixture f(9600, 1, uart::UART_CONFIG_PARITY_NONE, true);
+    int fd = f.connect(); f.incoming(fd, request(1, fc)); f.poll(); f.hub.transmit();
+    uint32_t before = f.bridge.get_drops_rtu_mismatch();
+    f.hub.complete(modbus::ModbusClientHub::RESPONSE, fc == 4 ?
+        std::vector<uint8_t>{4,4,0,1,0,2} : std::vector<uint8_t>{6,0,19,0,1});
+    assert(fake::connections[fd].tx.empty() && f.bridge.queued() == 0);
+    assert(f.bridge.get_drops_rtu_mismatch() == before + 1);
+    f.incoming(fd, request(2, fc)); f.poll(); f.hub.transmit();
+    f.hub.complete(modbus::ModbusClientHub::ERROR);
+    assert((fake::connections[fd].tx == std::vector<uint8_t>{0,2,0,0,0,3,1,uint8_t(fc | 0x80),2}));
+  }
+}
+
+static void test_hub_disconnect_before_and_after_send() {
+  for (bool sent : {false, true}) {
+    Fixture f(9600, 1, uart::UART_CONFIG_PARITY_NONE, true);
+    int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
+    if (sent) f.hub.transmit();
+    fake::connections[fd].connected = false; f.poll();
+    int replacement = f.connect(); f.incoming(replacement, request(2)); f.poll();
+    if (sent) {
+      assert(f.bridge.active_tid() == 1);
+      f.hub.complete(modbus::ModbusClientHub::RESPONSE, {4,2,0,11});
+      assert(fake::connections[replacement].tx.empty()); f.advance(50);
+    }
+    assert(f.bridge.active_tid() == 2 && f.hub.entries.size() == 1);
+    f.hub.transmit(); f.hub.complete(modbus::ModbusClientHub::RESPONSE, {4,2,0,22});
+    assert(fake::connections[replacement].tx[1] == 2 && fake::connections[replacement].tx[10] == 22);
+  }
+}
+
+static void test_hub_shutdown_preserves_local_requests() {
+  for (bool sent : {false, true}) {
+    Fixture f(9600, 1, uart::UART_CONFIG_PARITY_NONE, true);
+    LocalHubClient local; local.set_parent(&f.hub);
+    int fd = f.connect(); f.incoming(fd, request(1)); f.poll();
+    if (sent) f.hub.transmit();
+    const uint8_t pdu[] = {4,0,18,0,1}; f.hub.queue_pdu(1, pdu, &local);
+    f.bridge.set_enabled(false);
+    assert(f.bridge.queued() == 0 && f.uart.read_array_sizes.empty());
+    if (sent) f.hub.complete(modbus::ModbusClientHub::RESPONSE, {4,2,0,11});
+    assert(f.hub.entries.size() == 1 && f.hub.entries.front()->device == &local);
+    f.hub.transmit(); f.hub.complete(modbus::ModbusClientHub::RESPONSE, {4,2,0,22});
+    assert(local.received == 1 && fake::connections[fd].tx.empty());
+  }
+}
+
+static void test_hub_protection_rechecks_unsent_requests() {
+  for (uint8_t fc : {uint8_t(4), uint8_t(6)}) {
+    Fixture f(9600, 1, uart::UART_CONFIG_PARITY_NONE, true);
+    f.bridge.add_trusted_network(0xC0A80100, 0xFFFFFF00);
+    int fd = f.connect(0xCB007109); f.incoming(fd, request(1, fc)); f.poll();
+    assert(f.hub.entries.size() == 1);
+    if (fc == 4) f.bridge.set_protect_reads_for_untrusted_clients(true);
+    else f.bridge.set_protect_writes_for_untrusted_clients(true);
+    f.advance(50);
+    assert(f.hub.entries.empty() && f.bridge.queued() == 0 && fake::connections[fd].tx.empty());
+  }
+}
+
+static void test_hub_restart_ignores_late_response() {
+  Fixture f(9600, 1, uart::UART_CONFIG_PARITY_NONE, true);
+  int old = f.connect(); f.incoming(old, request(1)); f.poll(); f.hub.transmit();
+  network::connected = false; f.network_tick();
+  assert(!f.bridge.running() && f.bridge.queued() == 0);
+  network::connected = true; f.network_tick();
+  int replacement = f.connect(); f.incoming(replacement, request(2)); f.poll();
+  assert(f.hub.entries.size() == 2 && f.hub.entries.front()->device == nullptr);
+  f.hub.complete(modbus::ModbusClientHub::RESPONSE, {4,2,0,11});
+  assert(fake::connections[replacement].tx.empty() && f.bridge.active_tid() == 2);
+  f.hub.transmit(); f.hub.complete(modbus::ModbusClientHub::RESPONSE, {4,2,0,22});
+  assert(fake::connections[replacement].tx[1] == 2 && fake::connections[replacement].tx[10] == 22);
+}
+
+static void test_hub_automations_can_disable_bridge() {
+  for (int event = 0; event < 3; ++event) {
+    Fixture f(9600, 1, uart::UART_CONFIG_PARITY_NONE, true);
+    auto disable = [&](int, int) { f.bridge.set_enabled(false); };
+    if (event == 0) f.bridge.add_on_rtu_send_callback(disable);
+    if (event == 1) f.bridge.add_on_rtu_receive_callback(disable);
+    if (event == 2) f.bridge.add_on_rtu_timeout_callback(disable);
+    int fd = f.connect(); f.incoming(fd, request(1)); f.incoming(fd, request(2)); f.poll();
+    f.hub.transmit();
+    f.hub.complete(event == 2 ? modbus::ModbusClientHub::TIMEOUT : modbus::ModbusClientHub::RESPONSE, {4,2,0,11});
+    f.advance(50);
+    assert(f.bridge.queued() == 0 && f.hub.entries.empty() && !f.bridge.is_enabled());
+  }
+}
+
+static void test_hub_refusals_and_not_sent() {
+  Fixture f(9600, 1, uart::UART_CONFIG_PARITY_NONE, true);
+  int fd = f.connect(); f.hub.refuse = true;
+  f.incoming(fd, request(1)); f.poll(); assert(f.bridge.queued() == 0);
+  f.hub.refuse = false; f.incoming(fd, request(2)); f.poll();
+  f.hub.complete(modbus::ModbusClientHub::NOT_SENT);
+  assert(f.bridge.queued() == 0 && fake::connections[fd].tx.empty());
+  f.incoming(fd, request(3)); f.poll(); f.hub.transmit();
+  f.hub.complete(modbus::ModbusClientHub::RESPONSE, {4,2,0,33});
+  assert(fake::connections[fd].tx[1] == 3);
+}
+
+static void test_hub_unit_zero_and_custom_function() {
+  Fixture f(9600, 1, uart::UART_CONFIG_PARITY_NONE, true);
+  int fd = f.connect(); auto data = request(1, 0x41); data[6] = 0;
+  f.incoming(fd, data); f.poll();
+  assert(f.hub.entries.front()->options.allow_broadcast_read &&
+         f.hub.entries.front()->options.expect_broadcast_write_response);
+  f.hub.transmit(); f.hub.complete(modbus::ModbusClientHub::RESPONSE, {0x41,0x10,0x20});
+  assert((fake::connections[fd].tx == std::vector<uint8_t>{0,1,0,0,0,4,0,0x41,0x10,0x20}));
+}
+#endif
+
 int main() {
   test_tcp_buffer(); test_tcp_fragments(); test_echo_and_delayed_response();
   test_invalid_responses_keep_deadline(); test_valid_write_and_exception(); test_no_response_and_incomplete();
@@ -687,6 +968,10 @@ int main() {
   test_short_prefix_does_not_hide_valid_frame(); test_short_prefix_keeps_original_timeout_and_resets();
   test_unrelated_short_noise_is_discarded(); test_unknown_function_crc_ending_in_uid();
   test_short_prefix_still_requires_matching_fc_and_crc(); test_short_prefix_capture_remains_bounded();
+  test_uart_block_reads_complete_frames(); test_uart_block_appends_fragments_and_defers_new_bytes();
+  test_uart_block_overflow_drains_only_snapshot(); test_uart_block_read_failure_discards_capture_and_recovers();
+  test_uart_block_fragment_capacity_stays_bounded();
+  test_uart_block_read_failure_keeps_original_deadline(); test_uart_block_overflow_read_failure();
   test_bad_crc_candidate_and_trailing_noise(); test_partial_noise_keeps_original_timeout(); test_unknown_function_unchanged();
   test_bus_gap_and_immediate_tcp_reply(); test_bus_gap_for_new_request_and_late_bytes(); test_bus_gap_micros_wrap();
   test_bus_gap_with_parity_and_two_stop_bits();
@@ -697,9 +982,18 @@ int main() {
   test_dns_pending_disconnect_frees_slots(); test_dns_pending_buffer_preserves_requests();
   test_dns_pending_disconnect_after_data(); test_dns_pending_buffer_is_bounded();
   test_runtime_client_limit_changes(); test_client_limit_changed_by_automation();
+#ifdef USE_MODBUS_BRIDGE_HUB
+  test_hub_interleaves_local_client(); test_hub_identical_requests_have_separate_replies();
+  test_hub_multiple_units_and_clients(); test_hub_owns_timeout_and_does_not_retry();
+  test_hub_validates_replies_and_forwards_exceptions(); test_hub_disconnect_before_and_after_send();
+  test_hub_shutdown_preserves_local_requests(); test_hub_protection_rechecks_unsent_requests();
+  test_hub_automations_can_disable_bridge(); test_hub_refusals_and_not_sent();
+  test_hub_unit_zero_and_custom_function(); test_hub_restart_ignores_late_response();
+  puts("Shared hub: 12 bridge regression tests passed");
+#endif
 #ifdef USE_ESP32
-  puts("ESP32: 47 bridge regression tests passed");
+  puts("ESP32: 54 bridge regression tests passed");
 #else
-  puts("ESP8266: 47 bridge regression tests passed");
+  puts("ESP8266: 54 bridge regression tests passed");
 #endif
 }

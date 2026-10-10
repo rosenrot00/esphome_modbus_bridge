@@ -217,12 +217,27 @@ public:
   uint32_t baud_rate = 9600;
   uint8_t data_bits = 8, stop_bits = 1;
   UARTParityOptions parity = UART_CONFIG_PARITY_NONE;
+  size_t read_byte_calls = 0;
+  std::vector<size_t> read_array_sizes;
+  size_t fail_read_array_call = 0, partial_read_bytes = 0;
+  std::function<void()> after_read_array;
   uint32_t get_baud_rate() const { return baud_rate; }
   uint8_t get_data_bits() const { return data_bits; }
   uint8_t get_stop_bits() const { return stop_bits; }
   UARTParityOptions get_parity() const { return parity; }
   size_t available() const { return rx.size(); }
-  bool read_byte(uint8_t *b) { if (rx.empty()) return false; *b = rx.front(); rx.pop_front(); return true; }
+  bool read_byte(uint8_t *b) { ++read_byte_calls; if (rx.empty()) return false; *b = rx.front(); rx.pop_front(); return true; }
+  bool read_array(uint8_t *data, size_t len) {
+    read_array_sizes.push_back(len);
+    if (rx.size() < len) return false;
+    const bool fail = read_array_sizes.size() == fail_read_array_call;
+    const size_t count = fail ? std::min(len, partial_read_bytes) : len;
+    for (size_t i = 0; i < count; ++i) { data[i] = rx.front(); rx.pop_front(); }
+    auto callback = std::move(after_read_array);
+    after_read_array = nullptr;
+    if (callback) callback();
+    return !fail;
+  }
   void write_array(const std::vector<uint8_t> &data) { tx.push_back(data); tx_times.push_back(micros()); }
   UARTFlushResult flush() { return UARTFlushResult::UART_FLUSH_RESULT_SUCCESS; }
 };

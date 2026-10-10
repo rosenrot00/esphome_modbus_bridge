@@ -4,6 +4,7 @@ This ESPHome component provides a transparent Modbus TCP-to-RTU bridge for ESP82
 
 | Version | Changes |
 |---|---|
+| 2026.10.2 | Added parallel operation of TCP bridge and local ESPHome sensors via a shared Modbus hub; optimized UART block reads |
 | 2026.10.1 | Improved handling of short RTU response fragments across UART batches without extending timeouts |
 | 2026.09.3 | Fixed TCP automation safety, disconnect cleanup during DNS checks, and runtime client-limit changes |
 | 2026.09.2 | Improved echo/noise recovery, enforced RTU bus gaps, rechecked queued access permissions, and fixed TCP length-drop counting |
@@ -39,10 +40,11 @@ The bridge listens on a configurable TCP port (default: 502) and expects standar
 - Connect Modbus TCP software to Modbus RTU devices over one ESP
 - Works on both ESP32 and ESP8266
 - Supports multiple TCP clients at the same time
+- Optional shared ESPHome Modbus hub for TCP access and local sensors on one bus
 - Configurable port, timeouts, and client limits
 - Supports RS-485 transceivers with separate `DE`/`RE` pins or one shared GPIO
 - Validates RTU response CRC before forwarding responses to TCP clients
-- Strips RTU echo/noise when a valid matching response frame can be recovered
+- In direct UART mode, strips RTU echo/noise when a valid matching response frame can be recovered
 - Drops RTU responses whose UID, function, expected length, or standard write echo does not match the active request
 - Optional write protection that allows untrusted clients to use only standard read-only functions `0x01`-`0x04`
 - Optional read protection for clients outside trusted networks or trusted DNS hosts
@@ -55,7 +57,7 @@ Runtime counters and the related example sensors are aggregated across all confi
 
 Since version `2026.06.1`, RTU responses are checked against the active request after CRC validation. The bridge verifies matching Unit ID, matching Function Code (or Modbus exception Function Code), and for known response types also the exact expected response length. Standard write responses (`0x05`, `0x06`, `0x0F`, `0x10`) must also echo the requested address and value or quantity. Read responses do not contain the requested start address, so an old read response with the same Unit ID, Function Code, and byte count cannot be distinguished from the current response. Dropped frames are counted as `RTU Mismatch Drops`.
 
-Since `2026.09.1`, discarded RTU echoes or invalid responses no longer advance the request queue: the bridge keeps waiting for a valid matching response until the original timeout. Trusted-host DNS lookups run asynchronously; clients awaiting a trust decision cannot send requests to the RTU bus. Existing clients keep working during DNS resolution.
+Since `2026.09.1`, discarded RTU echoes or invalid responses in direct UART mode no longer advance the request queue: the bridge keeps waiting for a valid matching response until the original timeout. Trusted-host DNS lookups run asynchronously; clients awaiting a trust decision cannot send requests to the RTU bus. Existing clients keep working during DNS resolution.
 
 When read or write protection is active, untrusted clients are limited to two pending requests, UID `0` broadcasts are dropped, and queued requests from trusted clients are handled before queued untrusted requests. The currently active RTU request is never interrupted.
 
@@ -126,7 +128,56 @@ modbus_bridge:
   uart_id: uart_bus
 ```
 
-##### Full YAML (all options, automations, sensors)
+##### Shared Modbus Hub (TCP Bridge + Local Sensor)
+
+With ESPHome 2026.9.1 or newer, the bridge can optionally use an ESPHome Modbus client hub instead of accessing the UART directly. This lets TCP clients and local ESPHome sensors share the same RS485 bus: the hub sends one request at a time and routes each response to its requester.
+
+Keep the device, Wi-Fi and external component configuration from the minimal example above, and replace its `uart` and `modbus_bridge` sections with this example:
+
+```yaml
+uart:
+  id: uart_bus
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 9600
+
+modbus:
+  id: shared_hub
+  uart_id: uart_bus
+  role: client
+  send_wait_time: 1000ms
+  turnaround_time: 0ms         # Recommended; ESPHome defaults to 600ms
+  # flow_control_pin: GPIO18   # Optional: connected to the transceiver's DE and /RE
+
+modbus_bridge:
+  id: mb_bridge
+  modbus_id: shared_hub        # Use this instead of uart_id
+
+modbus_controller:
+  - id: local_meter
+    modbus_id: shared_hub
+    address: 1
+    update_interval: 10s
+
+sensor:
+  - platform: modbus_controller
+    modbus_controller_id: local_meter
+    name: "Holding Register 0"
+    register_type: holding
+    address: 0
+    value_type: U_WORD
+    accuracy_decimals: 0
+```
+
+The sensor reads holding register 0 from device 1; adapt the address, register type and value format to your device. TCP clients can use the bridge as before, including other device addresses on the same bus.
+
+**We recommend `turnaround_time: 0ms`** to avoid the hub's default extra 600ms pause between transactions. The mandatory RTU inter-frame silence is still enforced. Increase this extra pause only if your device needs more recovery time.
+
+Choose exactly one backend per bridge: `uart_id` (existing direct mode) or `modbus_id` (shared hub). In hub mode, only the hub may access this UART. Configure the response wait with `send_wait_time` on the hub and direction control with its `flow_control_pin`; do not set `rtu_response_timeout`, `de_pin`, `re_pin` or `crc_bytes_swapped` on the bridge. The bridge does not change settings of the shared hub.
+
+TCP transaction IDs, access protection and bridge automations remain supported. The hub handles UART framing and CRC validation, so the direct backend's additional echo/noise recovery and raw-UART CRC/incomplete counters do not apply in hub mode. A mismatched reply delivered by the hub is dropped; unlike direct UART mode, that hub transaction has already ended. Hub errors are logged by ESPHome's `modbus` component; bridge timeout and response-mismatch counters still apply to TCP requests. Local sensor requests do not increment bridge counters or trigger bridge RTU automations.
+
+##### Full YAML (Direct UART: all options, automations, sensors)
 
 ```yaml
 esphome:

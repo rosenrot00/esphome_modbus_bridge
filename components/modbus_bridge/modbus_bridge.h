@@ -11,6 +11,9 @@
 #include <string>
 #include <atomic>
 #include "esphome/core/automation.h" // Brings in CallbackManager & Trigger types transitively
+#ifdef USE_MODBUS_BRIDGE_HUB
+#include "esphome/components/modbus/modbus.h"
+#endif
 
 #ifdef USE_ESP8266
 #include <ESP8266WiFi.h>
@@ -114,11 +117,22 @@ namespace esphome
     };
 
     class ModbusBridgeComponent : public Component
+#ifdef USE_MODBUS_BRIDGE_HUB
+                                , public modbus::ModbusClientDevice
+#endif
     {
     public:
       ModbusBridgeComponent();
 
       void set_uart_id(uart::UARTComponent *uart) { uart_ = uart; }
+#ifdef USE_MODBUS_BRIDGE_HUB
+      void set_modbus_id(modbus::ModbusClientHub *hub) { this->set_parent(hub); }
+      void on_sent(std::span<const uint8_t> request_pdu) override;
+      void on_response(std::span<const uint8_t> request_pdu, std::span<const uint8_t> response_pdu) override;
+      void on_error(std::span<const uint8_t> request_pdu, modbus::ExceptionCode exception_code) override;
+      bool on_no_response(std::span<const uint8_t> request_pdu) override;
+      void on_not_sent(std::span<const uint8_t> request_pdu) override;
+#endif
       void set_tcp_port(uint16_t port) { tcp_port_ = port; }
       void set_tcp_poll_interval(uint32_t interval_ms) { tcp_poll_interval_ms_ = interval_ms; }
       void set_tcp_client_timeout(uint32_t timeout_ms) { tcp_client_timeout_ms_ = timeout_ms; }
@@ -224,6 +238,11 @@ namespace esphome
 
       bool polling_active_{false};
       bool rtu_request_active_{false};
+#ifdef USE_MODBUS_BRIDGE_HUB
+      bool hub_request_sent_{false};
+      bool hub_request_matches_(std::span<const uint8_t> request_pdu) const;
+      void cancel_unsent_hub_request_();
+#endif
       bool bus_activity_seen_{false};
       uint32_t last_bus_activity_us_{0};
       uint32_t rtu_frame_gap_us_{1750};
@@ -259,6 +278,7 @@ namespace esphome
       bool normalize_rtu_response_(PendingRequest &pending, bool &incomplete);
       void initialize_tcp_server_();
       void poll_uart_response_();
+      void forward_response_(uint8_t uid, const uint8_t *pdu, size_t pdu_len);
       void check_tcp_sockets_();
       void check_tcp_sockets_esp8266_();
       void check_tcp_sockets_esp32_();
