@@ -18,6 +18,10 @@ public:
   virtual ~ModbusClientDevice();
   void set_parent(ModbusClientHub *parent) { parent_ = parent; }
   void clear_tx_queue_for_device();
+  // Preserve the legacy API to catch name collisions with the socket send().
+  void send(uint8_t, uint16_t, uint16_t, uint8_t = 0, const uint8_t * = nullptr) {
+    assert(false && "The bridge must not use the legacy Modbus send()");
+  }
   virtual void on_sent(std::span<const uint8_t>) {}
   virtual void on_response(std::span<const uint8_t>, std::span<const uint8_t>) {}
   virtual void on_error(std::span<const uint8_t>, ExceptionCode) {}

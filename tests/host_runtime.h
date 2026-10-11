@@ -113,6 +113,11 @@ template<class... Args> void log(const char *format, Args... args) {
 }
 }
 
+// A global overload preserves member name lookup instead of bypassing it with a macro.
+inline int send(int fd, const uint8_t *data, size_t len, int flags) {
+  return fake::send(fd, data, len, flags);
+}
+
 #define socket(...) fake::socket(__VA_ARGS__)
 #define close(...) fake::close(__VA_ARGS__)
 #define bind(...) fake::bind(__VA_ARGS__)
@@ -121,7 +126,6 @@ template<class... Args> void log(const char *format, Args... args) {
 #define setsockopt(...) fake::setsockopt(__VA_ARGS__)
 #define accept(...) fake::accept(__VA_ARGS__)
 #define recv(...) fake::recv(__VA_ARGS__)
-#define send(...) fake::send(__VA_ARGS__)
 #define lwip_select(...) fake::select(__VA_ARGS__)
 #define ESP_LOGD(tag, ...) fake::log(__VA_ARGS__)
 #define ESP_LOGI(tag, ...) fake::log(__VA_ARGS__)

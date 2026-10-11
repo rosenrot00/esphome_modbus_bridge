@@ -458,7 +458,7 @@ namespace esphome
       const uint32_t started = millis();
       while (written < len && millis() - started < kTcpSendTimeoutMs)
       {
-        const int n = send(fd, data + written, len - written, 0);
+        const int n = ::send(fd, data + written, len - written, 0);
         if (n > 0)
         {
           written += static_cast<size_t>(n);
