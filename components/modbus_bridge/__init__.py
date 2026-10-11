@@ -231,46 +231,22 @@ async def to_code(config):
         for host in conf[CONF_TRUSTED_HOSTS]:
             cg.add(var.add_trusted_host(host))
 
-        # Bind YAML automations → C++ callbacks (function_code, address)
-        async def _bind(list_key: str, adder: str):
-            if list_key in conf:
-                for ac in conf[list_key]:
-                    trig = cg.new_Pvariable(ac[CONF_TRIGGER_ID])
-                    # C++ lambda triggers the automation with (function_code, address)
-                    cb = cg.RawExpression(
-                        f"[](int fc, int addr) {{ {trig}->trigger(fc, addr); }}"
-                    )
-                    cg.add(getattr(var, adder)(cb))
-                    await automation.build_automation(
-                        trig, [(cg.int_, "function_code"), (cg.int_, "address")], ac
-                    )
-
-        # RTU-centric events
-        await _bind(CONF_ON_RTU_SEND, "add_on_rtu_send_callback")
-        await _bind(CONF_ON_RTU_RECEIVE, "add_on_rtu_receive_callback")
-        await _bind(CONF_ON_RTU_TIMEOUT, "add_on_rtu_timeout_callback")
-
-        # Bind simple no-arg TCP server events
-        if CONF_ON_TCP_STARTED in conf:
-            for ac in conf[CONF_ON_TCP_STARTED]:
+        async def _bind(list_key: str, adder: str, args=()):
+            parameters = ", ".join(f"{arg_type} {name}" for arg_type, name in args)
+            arguments = ", ".join(name for _, name in args)
+            for ac in conf.get(list_key, ()):
                 trig = cg.new_Pvariable(ac[CONF_TRIGGER_ID])
-                cb = cg.RawExpression(f"[]() {{ {trig}->trigger(); }}")
-                cg.add(var.add_on_tcp_started_callback(cb))
-                await automation.build_automation(trig, [], ac)
+                cb = cg.RawExpression(f"[]({parameters}) {{ {trig}->trigger({arguments}); }}")
+                cg.add(getattr(var, adder)(cb))
+                await automation.build_automation(trig, list(args), ac)
 
-        if CONF_ON_TCP_STOPPED in conf:
-            for ac in conf[CONF_ON_TCP_STOPPED]:
-                trig = cg.new_Pvariable(ac[CONF_TRIGGER_ID])
-                cb = cg.RawExpression(f"[]() {{ {trig}->trigger(); }}")
-                cg.add(var.add_on_tcp_stopped_callback(cb))
-                await automation.build_automation(trig, [], ac)
-
-        if CONF_ON_TCP_CLIENTS_CHANGED in conf:
-            for ac in conf[CONF_ON_TCP_CLIENTS_CHANGED]:
-                trig = cg.new_Pvariable(ac[CONF_TRIGGER_ID])
-                cb = cg.RawExpression(f"[](int count) {{ {trig}->trigger(count); }}")
-                cg.add(var.add_on_tcp_clients_changed_callback(cb))
-                await automation.build_automation(trig, [(cg.int_, "count")], ac)
+        rtu_args = ((cg.int_, "function_code"), (cg.int_, "address"))
+        await _bind(CONF_ON_RTU_SEND, "add_on_rtu_send_callback", rtu_args)
+        await _bind(CONF_ON_RTU_RECEIVE, "add_on_rtu_receive_callback", rtu_args)
+        await _bind(CONF_ON_RTU_TIMEOUT, "add_on_rtu_timeout_callback", rtu_args)
+        await _bind(CONF_ON_TCP_STARTED, "add_on_tcp_started_callback")
+        await _bind(CONF_ON_TCP_STOPPED, "add_on_tcp_stopped_callback")
+        await _bind(CONF_ON_TCP_CLIENTS_CHANGED, "add_on_tcp_clients_changed_callback", ((cg.int_, "count"),))
 
         # optional RS-485 DE and /RE pins
         if CONF_DE_PIN in conf:

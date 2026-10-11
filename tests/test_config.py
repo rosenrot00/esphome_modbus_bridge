@@ -39,7 +39,7 @@ HUB = """modbus:
 
 
 class ConfigTests(unittest.TestCase):
-    def check_config(self, contents, error=None, generate=False):
+    def check_config(self, contents, error=None, generate=False, generated_file="esphome/core/defines.h"):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "test.yaml"
             path.write_text(BASE + contents)
@@ -53,7 +53,7 @@ class ConfigTests(unittest.TestCase):
             else:
                 self.assertEqual(result.returncode, 0, output)
                 if generate:
-                    return (Path(directory) / ".esphome/build/bridge-config-test/src/esphome/core/defines.h").read_text()
+                    return (Path(directory) / ".esphome/build/bridge-config-test/src" / generated_file).read_text()
 
     def test_direct_backend(self):
         defines = self.check_config(UART + "modbus_bridge:\n  uart_id: uart_bus\n", generate=True)
@@ -65,6 +65,31 @@ class ConfigTests(unittest.TestCase):
         example = re.search(r"```yaml\n(.*?)```", section, re.S).group(1)
         defines = self.check_config(example, generate=True)
         self.assertIn("USE_MODBUS_BRIDGE_HUB", defines)
+
+    def test_all_automation_events(self):
+        events = (
+            ("rtu_send", ("function_code", "address")),
+            ("rtu_receive", ("function_code", "address")),
+            ("rtu_timeout", ("function_code", "address")),
+            ("tcp_started", ()),
+            ("tcp_stopped", ()),
+            ("tcp_clients_changed", ("count",)),
+        )
+        automations = ""
+        for event, args in events:
+            log_args = "".join(f", {name}" for name in args)
+            actions = f'    - then:\n        - lambda: ESP_LOGI("test", "event {"%d " * len(args)}"{log_args});\n'
+            automations += f"  on_{event}:\n" + actions * 2
+        for backend in ("uart_id: uart_bus", "modbus_id: shared_hub"):
+            with self.subTest(backend=backend):
+                source = self.check_config(UART + (HUB if backend.startswith("modbus_id") else "") +
+                                           f"modbus_bridge:\n  {backend}\n" + automations,
+                                           generate=True, generated_file="main.cpp")
+                for event, args in events:
+                    parameters = ", ".join(f"int {name}" for name in args)
+                    callback = f"add_on_{event}_callback([]({parameters})"
+                    self.assertEqual(source.count(callback), 2, source)
+                    self.assertIn(f"->trigger({', '.join(args)});", source)
 
     def test_mixed_backends(self):
         self.check_config(HUB + """modbus_bridge:

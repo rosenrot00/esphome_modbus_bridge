@@ -12,6 +12,8 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -40,10 +42,13 @@ struct Connection {
   bool listener = false;
   uint32_t ip = 0xC0A80120;
   uint16_t port = 40000;
+  size_t close_calls = 0;
+  int send_error = 0;
   std::deque<uint8_t> rx;
   std::vector<uint8_t> tx;
 };
 inline std::map<int, Connection> connections;
+inline size_t socket_stop_calls = 0;
 inline std::deque<int> accepts;
 inline int next_fd = 3;
 inline int client(uint32_t ip = 0xC0A80120) {
@@ -58,7 +63,7 @@ inline int socket(int, int, int) {
   connections[fd].listener = true;
   return fd;
 }
-inline int close(int fd) { connections[fd].connected = false; return 0; }
+inline int close(int fd) { ++connections[fd].close_calls; connections[fd].connected = false; return 0; }
 inline int bind(int, const sockaddr *, socklen_t) { return 0; }
 inline int listen(int, int) { return 0; }
 inline int fcntl(int, int, int) { return 0; }
@@ -85,6 +90,7 @@ inline int recv(int fd, void *data, size_t len, int) {
 }
 inline int send(int fd, const void *data, size_t len, int) {
   auto &c = connections[fd];
+  if (c.send_error) { ++now; errno = c.send_error; return -1; }
   if (!c.connected) { errno = EPIPE; return -1; }
   const auto *p = static_cast<const uint8_t *>(data);
   c.tx.insert(c.tx.end(), p, p + len);
@@ -198,8 +204,13 @@ template<class> class CallbackManager;
 template<class... Args> class CallbackManager<void(Args...)> {
   std::vector<std::function<void(Args...)>> callbacks_;
 public:
-  void add(std::function<void(Args...)> &&cb) { callbacks_.push_back(std::move(cb)); }
-  void call(Args... args) { for (auto &cb : callbacks_) cb(args...); }
+  size_t wrapped_adds = 0, call_count = 0;
+  template<class F> void add(F &&cb) {
+    if constexpr (std::is_same_v<std::decay_t<F>, std::function<void(Args...)>>) ++wrapped_adds;
+    callbacks_.emplace_back(std::forward<F>(cb));
+  }
+  size_t size() const { return callbacks_.size(); }
+  void call(Args... args) { ++call_count; for (auto &cb : callbacks_) cb(args...); }
 };
 namespace switch_ {
 class Switch { public: bool state = false; void publish_state(bool value) { state = value; }
@@ -274,7 +285,7 @@ public:
   int available() { return fd < 0 ? 0 : fake::connections[fd].rx.size(); }
   int read(uint8_t *data, size_t size) { return (fake::recv)(fd, data, size, 0); }
   size_t write(const uint8_t *data, size_t size) { int n = (fake::send)(fd, data, size, 0); return n > 0 ? n : 0; }
-  void stop() { if (fd >= 0) (fake::close)(fd); fd = -1; }
+  void stop() { ++fake::socket_stop_calls; if (fd >= 0) (fake::close)(fd); fd = -1; }
   void setNoDelay(bool) {}
   void setTimeout(unsigned) {}
   IPAddress remoteIP() { return {fake::connections[fd].ip}; }

@@ -5,7 +5,7 @@
 #include "esphome/components/switch/switch.h"
 #include "esphome/core/hal.h" // GPIOPin
 #include <vector>
-#include <functional>
+#include <utility>
 #include <cstring>
 #include <deque>
 #include <string>
@@ -24,30 +24,21 @@ namespace esphome
   namespace modbus_bridge
   {
 
-#ifdef USE_ESP8266
-    struct TCPClient8266
-    {
-      WiFiClient socket;
-      uint32_t last_activity = 0;
-      bool disconnect_notified = false; // suppress repeated disconnect logs
-      uint32_t remote_ipv4 = 0;
-      uint16_t remote_port = 0;
-      bool trusted = true;
-      bool trust_pending = false;
-    };
-#endif
-
-#ifdef USE_ESP32
     struct TCPClient
     {
+#ifdef USE_ESP8266
+      WiFiClient socket;
+      bool disconnect_notified = true; // inactive until a client is installed
+#elif defined(USE_ESP32)
       int fd = -1;
+#endif
+      std::vector<uint8_t> rx_buffer;
       uint32_t last_activity = 0;
       uint32_t remote_ipv4 = 0;
       uint16_t remote_port = 0;
       bool trusted = true;
       bool trust_pending = false;
     };
-#endif
 
     struct TrustedNetwork
     {
@@ -122,8 +113,6 @@ namespace esphome
 #endif
     {
     public:
-      ModbusBridgeComponent();
-
       void set_uart_id(uart::UARTComponent *uart) { uart_ = uart; }
 #ifdef USE_MODBUS_BRIDGE_HUB
       void set_modbus_id(modbus::ModbusClientHub *hub) { this->set_parent(hub); }
@@ -186,34 +175,29 @@ namespace esphome
       void set_re_pin(GPIOPin *pin) { re_pin_ = pin; }
 
       // Bridge-global automation adders (events carry function_code and start_address)
-      void add_on_rtu_send_callback(std::function<void(int, int)> &&cb) { rtu_send_cb_.add(std::move(cb)); }
-      void add_on_rtu_receive_callback(std::function<void(int, int)> &&cb) { rtu_receive_cb_.add(std::move(cb)); }
-      void add_on_rtu_timeout_callback(std::function<void(int, int)> &&cb) { rtu_timeout_cb_.add(std::move(cb)); }
+      template<typename F> void add_on_rtu_send_callback(F &&cb) { rtu_send_cb_.add(std::forward<F>(cb)); }
+      template<typename F> void add_on_rtu_receive_callback(F &&cb) { rtu_receive_cb_.add(std::forward<F>(cb)); }
+      template<typename F> void add_on_rtu_timeout_callback(F &&cb) { rtu_timeout_cb_.add(std::forward<F>(cb)); }
 
-      void add_on_tcp_started_callback(std::function<void()> &&cb) { tcp_started_cb_.add(std::move(cb)); }
-      void add_on_tcp_stopped_callback(std::function<void()> &&cb) { tcp_stopped_cb_.add(std::move(cb)); }
-      void add_on_tcp_clients_changed_callback(std::function<void(int)> &&cb) { tcp_clients_changed_cb_.add(std::move(cb)); }
+      template<typename F> void add_on_tcp_started_callback(F &&cb) { tcp_started_cb_.add(std::forward<F>(cb)); }
+      template<typename F> void add_on_tcp_stopped_callback(F &&cb) { tcp_stopped_cb_.add(std::forward<F>(cb)); }
+      template<typename F> void add_on_tcp_clients_changed_callback(F &&cb) { tcp_clients_changed_cb_.add(std::forward<F>(cb)); }
 
       void setup() override;
 
     protected:
       uart::UARTComponent *uart_{nullptr};
       int sock_{-1};
-#if defined(USE_ESP32)
-      std::vector<TCPClient> clients_;
-      std::vector<std::vector<uint8_t>> rx_accu_;
-#elif defined(USE_ESP8266)
+#ifdef USE_ESP8266
       WiFiServer server_{502};
-      std::vector<TCPClient8266> clients_;
-      std::vector<std::vector<uint8_t>> rx_accu8266_;
 #endif
+      std::vector<TCPClient> clients_;
       std::deque<PendingRequest> pending_requests_;
       uint16_t tcp_port_{502};
       bool debug_{false};
       uint32_t tcp_poll_interval_ms_{50};
       uint32_t rtu_poll_interval_ms_{10};
       uint32_t tcp_client_timeout_ms_{60000};
-      uint32_t rtu_inactivity_timeout_ms_{20};
       uint32_t rtu_response_timeout_ms_{1000};
       std::vector<uint8_t> temp_buffer_;
       std::vector<uint8_t> tcp_response_buffer_;
@@ -283,12 +267,14 @@ namespace esphome
       void check_tcp_sockets_esp8266_();
       void check_tcp_sockets_esp32_();
       void update_tcp_client_count_();
-      void handle_new_client_esp8266_(size_t allowed_clients);
-      void handle_new_client_esp32_(size_t allowed_clients);
+      void handle_new_client_(size_t allowed_clients);
       void shutdown_tcp_and_pending_();
       void record_tcp_client_connected_();
-      void refresh_tcp_client_count_();
-      void prepare_rx_accumulator_(std::vector<std::vector<uint8_t>> &accu, size_t target_size, size_t reserve_cap);
+#if defined(USE_ESP8266)
+      void install_client_(size_t slot, WiFiClient &socket, uint32_t ipv4, uint16_t port, bool trusted, bool trust_pending);
+#elif defined(USE_ESP32)
+      void install_client_(size_t slot, int fd, uint32_t ipv4, uint16_t port, bool trusted, bool trust_pending);
+#endif
       void handle_client_rx_chunk_(std::vector<uint8_t> &accu, int client_fd, const uint8_t *data, size_t len, size_t max_accu);
       bool is_client_slot_connected_(int slot);
       bool is_client_slot_trusted_(int slot) const;
@@ -311,7 +297,8 @@ namespace esphome
       size_t read_uart_response_bytes_(PendingRequest &req);
       void handle_tcp_payload(const uint8_t *data, size_t len, int client_fd);
       bool send_to_client_(int slot, const uint8_t *data, size_t len);
-      void purge_client_(size_t idx, std::vector<std::vector<uint8_t>> *accu_opt);
+      void close_client_(size_t slot, bool notify = true);
+      void purge_client_(size_t idx);
 
       // RS-485 helpers (no-ops when neither DE nor /RE pin is set)
       void rs485_begin_tx_();

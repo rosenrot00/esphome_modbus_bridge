@@ -43,8 +43,8 @@ namespace esphome
     static constexpr size_t kMaxPendingRequestsPerUntrustedClient = 2;
     static constexpr uint32_t kTcpSendTimeoutMs = 10;
     static constexpr uint32_t kTrustedHostCacheMs = 60000;
-    // Runtime toggle: preempt oldest same-IP connection when full
-    static bool kPreemptSameIP = true;
+    // Preempt the oldest same-IP connection when all slots are occupied.
+    static constexpr bool kPreemptSameIP = true;
 
     // Lightweight runtime counters aggregated across all bridge instances on the node.
     // This is intentional so diagnostics can reflect total bridge activity even when
@@ -446,9 +446,7 @@ namespace esphome
         return true;
 
       ESP_LOGW(TAG, "TCP send failed/short client_id=%d wrote=%u/%u", slot, (unsigned)written, (unsigned)len);
-      cl.socket.stop();
-      this->purge_client_((size_t)slot, &this->rx_accu8266_);
-      this->refresh_tcp_client_count_();
+      this->close_client_(static_cast<size_t>(slot));
       return false;
 #elif defined(USE_ESP32)
       const int fd = this->clients_[slot].fd;
@@ -490,10 +488,7 @@ namespace esphome
 
       ESP_LOGW(TAG, "TCP send failed/short client_id=%d wrote=%u/%u err=%s", slot,
                (unsigned)written, (unsigned)len, last_error != 0 ? strerror(last_error) : "timeout");
-      this->purge_client_((size_t)slot, &this->rx_accu_);
-      close(fd);
-      this->clients_[slot].fd = -1;
-      this->refresh_tcp_client_count_();
+      this->close_client_(static_cast<size_t>(slot));
       return false;
 #else
       return false;
@@ -580,34 +575,47 @@ namespace esphome
     static inline size_t find_oldest_slot_(size_t limit, Pred pred, LastActivity last_activity)
     {
       size_t victim = SIZE_MAX;
-      uint32_t oldest = 0xFFFFFFFFUL;
+      const uint32_t now = millis();
+      uint32_t oldest_age = 0;
       for (size_t i = 0; i < limit; ++i)
       {
         if (!pred(i))
           continue;
-        const uint32_t candidate = last_activity(i);
-        if (victim == SIZE_MAX || candidate < oldest)
+        const uint32_t age = now - last_activity(i);
+        if (victim == SIZE_MAX || age > oldest_age)
         {
           victim = i;
-          oldest = candidate;
+          oldest_age = age;
         }
       }
       return victim;
     }
 
-// Tiny counter helper
-#ifndef INC
-#define INC(x) \
-  do           \
-  {            \
-    ++(x);     \
-  } while (0)
-#endif
-    // Centralized purge for per-client state (accumulator + pending requests + polling flag)
-    void ModbusBridgeComponent::purge_client_(size_t idx, std::vector<std::vector<uint8_t>> *accu_opt)
+    void ModbusBridgeComponent::close_client_(size_t slot, bool notify)
     {
-      if (accu_opt && idx < accu_opt->size())
-        (*accu_opt)[idx].clear();
+      auto &client = this->clients_[slot];
+#if defined(USE_ESP8266)
+      if (client.disconnect_notified)
+        return;
+      client.socket.stop();
+      client.disconnect_notified = true;
+#elif defined(USE_ESP32)
+      if (client.fd < 0)
+        return;
+      close(client.fd);
+      client.fd = -1;
+#endif
+      client.trust_pending = false;
+      this->purge_client_(slot);
+      if (notify)
+        this->update_tcp_client_count_();
+    }
+
+    // Centralized purge for per-client state (accumulator + pending requests + polling flag)
+    void ModbusBridgeComponent::purge_client_(size_t idx)
+    {
+      if (idx < this->clients_.size())
+        this->clients_[idx].rx_buffer.clear();
 
 #ifdef USE_MODBUS_BRIDGE_HUB
       if (this->rtu_request_active_ && !this->hub_request_sent_ && !this->pending_requests_.empty() &&
@@ -641,24 +649,8 @@ namespace esphome
 
     void ModbusBridgeComponent::record_tcp_client_connected_()
     {
-      INC(g_clients_connected);
+      ++g_clients_connected;
       this->update_tcp_client_count_();
-    }
-
-    void ModbusBridgeComponent::refresh_tcp_client_count_()
-    {
-      this->update_tcp_client_count_();
-    }
-
-    void ModbusBridgeComponent::prepare_rx_accumulator_(std::vector<std::vector<uint8_t>> &accu, size_t target_size, size_t reserve_cap)
-    {
-      if (accu.size() < target_size)
-        accu.resize(target_size);
-      for (auto &v : accu)
-      {
-        if (v.capacity() < reserve_cap)
-          v.reserve(reserve_cap);
-      }
     }
 
     void ModbusBridgeComponent::refresh_trusted_host_cache_()
@@ -749,15 +741,7 @@ namespace esphome
         ++g_reject_untrusted_clients;
         ESP_LOGW(TAG, "Rejecting untrusted TCP client %s:%u", ipv4_to_cstr_(client.remote_ipv4, ipbuf, sizeof(ipbuf)),
                  (unsigned)client.remote_port);
-#if defined(USE_ESP32)
-        this->purge_client_(slot, &this->rx_accu_);
-        close(client.fd);
-        client.fd = -1;
-#else
-        client.socket.stop();
-        this->purge_client_(slot, &this->rx_accu8266_);
-#endif
-        this->refresh_tcp_client_count_();
+        this->close_client_(slot);
         return false;
       }
       if (this->debug_)
@@ -891,11 +875,6 @@ namespace esphome
 
     // -------------------------------------------------------------------------------------------
 
-    ModbusBridgeComponent::ModbusBridgeComponent()
-    {
-      this->enabled_ = true;
-    }
-
     void ModbusBridgeComponent::setup()
     {
       this->sock_ = -1;
@@ -914,8 +893,8 @@ namespace esphome
             this->uart_->get_stop_bits() + (this->uart_->get_parity() != uart::UART_CONFIG_PARITY_NONE));
         this->rtu_frame_gap_us_ = baud > 19200 ? 1750 :
             static_cast<uint32_t>((bits_per_char * 3500000ULL + baud - 1) / baud);
-        this->rtu_inactivity_timeout_ms_ = static_cast<uint32_t>(std::ceil((3.5 * 11.0 * 1000.0) / baud) + 1);
-        this->rtu_poll_interval_ms_ = this->rtu_inactivity_timeout_ms_ + 2;
+        const uint32_t inactivity_timeout_ms = static_cast<uint32_t>(std::ceil((3.5 * 11.0 * 1000.0) / baud) + 1);
+        this->rtu_poll_interval_ms_ = inactivity_timeout_ms + 2;
 
         // DE and /RE may share one GPIO; low selects receive mode for both.
         if (this->de_pin_ != nullptr)
@@ -1089,26 +1068,8 @@ namespace esphome
 #endif
       this->sock_ = -1;
 
-#if defined(USE_ESP8266)
       for (size_t i = 0; i < this->clients_.size(); ++i)
-      {
-        auto &cl = this->clients_[i];
-        if (cl.socket.connected())
-          cl.socket.stop();
-        this->purge_client_(i, &this->rx_accu8266_);
-      }
-#elif defined(USE_ESP32)
-      for (size_t i = 0; i < this->clients_.size(); ++i)
-      {
-        auto &cl = this->clients_[i];
-        this->purge_client_(i, &this->rx_accu_);
-        if (cl.fd >= 0)
-        {
-          close(cl.fd);
-          cl.fd = -1;
-        }
-      }
-#endif
+        this->close_client_(i, false);
 
       this->pending_requests_.clear();
       this->rtu_request_active_ = false;
@@ -1271,7 +1232,6 @@ namespace esphome
       req.client_fd = client_fd;
       req.trusted_client = trusted;
       // Build RTU frame directly in rtu_data: UID + PDU + CRC
-      req.rtu_data.clear();
       req.rtu_data.reserve(static_cast<size_t>(modbus_len) + 1 + 2); // UID + PDU + CRC
       req.rtu_data.push_back(uid);
       req.rtu_data.insert(req.rtu_data.end(), data + 7, data + 6 + modbus_len);
@@ -1295,9 +1255,6 @@ namespace esphome
       }
 
       memcpy(req.header, data, 7);
-      req.start_time = 0;
-      req.last_size = 0; // ensure deterministic timeout logic
-      req.stable_polls = 0;
       g_frames_in++;
       if (trusted && protected_mode && !this->pending_requests_.empty())
       {
@@ -1335,7 +1292,34 @@ namespace esphome
       }
     }
 
-    void ModbusBridgeComponent::handle_new_client_esp8266_(size_t allowed_clients)
+#if defined(USE_ESP8266)
+    void ModbusBridgeComponent::install_client_(size_t slot, WiFiClient &socket, uint32_t ipv4, uint16_t port,
+                                               bool trusted, bool trust_pending)
+#elif defined(USE_ESP32)
+    void ModbusBridgeComponent::install_client_(size_t slot, int fd, uint32_t ipv4, uint16_t port,
+                                               bool trusted, bool trust_pending)
+#endif
+    {
+      this->close_client_(slot, false);
+      auto &client = this->clients_[slot];
+#if defined(USE_ESP8266)
+      client.socket = socket;
+      client.socket.setNoDelay(true);
+      client.socket.setTimeout(10);
+      client.disconnect_notified = false;
+#elif defined(USE_ESP32)
+      configure_tcp_client_socket_(fd);
+      client.fd = fd;
+#endif
+      client.rx_buffer.reserve(kTcpAccuCap);
+      client.last_activity = millis();
+      client.remote_ipv4 = ipv4;
+      client.remote_port = port;
+      client.trusted = trusted;
+      client.trust_pending = trust_pending;
+    }
+
+    void ModbusBridgeComponent::handle_new_client_(size_t allowed_clients)
     {
 #if defined(USE_ESP8266)
       WiFiClient new_client = this->server_.accept();
@@ -1343,91 +1327,65 @@ namespace esphome
         return;
       const uint32_t remote_ipv4 = ipv4_to_u32_(new_client.remoteIP());
       const uint16_t remote_port = new_client.remotePort();
+#elif defined(USE_ESP32)
+      struct sockaddr_in client_addr;
+      socklen_t addr_len = sizeof(client_addr);
+      int new_client = accept(this->sock_, (struct sockaddr *)&client_addr, &addr_len);
+      if (new_client < 0)
+        return;
+      const uint32_t remote_ipv4 = ntohl(client_addr.sin_addr.s_addr);
+      const uint16_t remote_port = ntohs(client_addr.sin_port);
+#endif
+#if defined(USE_ESP8266) || defined(USE_ESP32)
       const bool trusted = !this->has_trust_rules_() || this->is_trusted_client_ipv4_(remote_ipv4);
       const bool trust_pending = !trusted && this->trusted_hosts_resolving_;
       char ipbuf[16];
+      ipv4_to_cstr_(remote_ipv4, ipbuf, sizeof(ipbuf));
+#ifdef USE_ESP32
+      if (this->debug_)
+        ESP_LOGD(TAG, "TCP accept %s:%u", ipbuf, (unsigned)remote_port);
+#endif
       if (this->is_reject_untrusted_clients_effective_() && !trusted && !trust_pending)
       {
         g_reject_untrusted_clients++;
-        ESP_LOGW(TAG, "Rejecting untrusted TCP client %s:%u", ipv4_to_cstr_(remote_ipv4, ipbuf, sizeof(ipbuf)), (unsigned) remote_port);
+        ESP_LOGW(TAG, "Rejecting untrusted TCP client %s:%u", ipbuf, (unsigned)remote_port);
+#ifdef USE_ESP8266
         new_client.stop();
+#else
+        close(new_client);
+#endif
         return;
       }
 
-      const size_t duplicate_idx = find_first_slot_(std::min(allowed_clients, this->clients_.size()), [&](size_t idx)
+      const size_t limit = std::min(allowed_clients, this->clients_.size());
+      const size_t duplicate_idx = find_first_slot_(limit, [&](size_t idx)
       {
-        auto &ex = this->clients_[idx];
-        return ex.socket.connected() &&
-               ex.remote_ipv4 == remote_ipv4 &&
-               ex.remote_port == remote_port;
+        const auto &client = this->clients_[idx];
+        return this->is_client_slot_connected_(static_cast<int>(idx)) &&
+               client.remote_ipv4 == remote_ipv4 && client.remote_port == remote_port;
       });
       if (duplicate_idx != SIZE_MAX)
       {
-        auto &ex = this->clients_[duplicate_idx];
-        ex.socket.stop();
-        this->purge_client_(duplicate_idx, &this->rx_accu8266_);
-        ex.socket = new_client;
-        ex.socket.setNoDelay(true);
-        ex.socket.setTimeout(10);
-        ex.last_activity = millis();
-        ex.disconnect_notified = false;
-        ex.remote_ipv4 = remote_ipv4;
-        ex.remote_port = remote_port;
-        ex.trusted = trusted;
-        ex.trust_pending = trust_pending;
-        this->refresh_tcp_client_count_();
+        this->install_client_(duplicate_idx, new_client, remote_ipv4, remote_port, trusted, trust_pending);
+        this->update_tcp_client_count_();
         return;
       }
 
-      // Ensure accumulator size tracks clients_ size and reserve capacity
-      this->prepare_rx_accumulator_(this->rx_accu8266_, this->clients_.size(), kTcpAccuCap);
-
-      const size_t free_idx = find_first_slot_(std::min(allowed_clients, this->clients_.size()), [&](size_t idx)
+      size_t free_idx = find_first_slot_(limit, [&](size_t idx)
       {
-        return !this->clients_[idx].socket.connected();
+        return !this->is_client_slot_connected_(static_cast<int>(idx));
       });
+      if (free_idx == SIZE_MAX && this->clients_.size() < allowed_clients)
+      {
+        free_idx = this->clients_.size();
+        this->clients_.emplace_back();
+      }
       if (free_idx != SIZE_MAX)
       {
-        // The disconnected slot may still own queued state because accepts are
-        // handled before disconnect cleanup on ESP8266.
-        this->purge_client_(free_idx, &this->rx_accu8266_);
-        this->clients_[free_idx].socket.stop();
-        this->clients_[free_idx].socket = new_client;
-        this->clients_[free_idx].socket.setNoDelay(true);
-        this->clients_[free_idx].socket.setTimeout(10);
-        this->clients_[free_idx].last_activity = millis();
-        this->rx_accu8266_[free_idx].clear();
-        this->clients_[free_idx].disconnect_notified = false;
-        this->clients_[free_idx].remote_ipv4 = remote_ipv4;
-        this->clients_[free_idx].remote_port = remote_port;
-        this->clients_[free_idx].trusted = trusted;
-        this->clients_[free_idx].trust_pending = trust_pending;
+        this->install_client_(free_idx, new_client, remote_ipv4, remote_port, trusted, trust_pending);
         ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d trusted=%s",
-                 ipv4_to_cstr_(remote_ipv4, ipbuf, sizeof(ipbuf)), (unsigned)remote_port, (int)free_idx,
+                 ipbuf, (unsigned)remote_port, (int)free_idx,
                  trust_pending ? "pending" : (trusted ? "yes" : "no"));
-        this->record_tcp_client_connected_();
-        return;
-      }
-
-      if (this->clients_.size() < allowed_clients)
-      {
-        TCPClient8266 client;
-        client.socket = new_client;
-        client.socket.setNoDelay(true);
-        client.socket.setTimeout(10);
-        client.last_activity = millis();
-        client.remote_ipv4 = remote_ipv4;
-        client.remote_port = remote_port;
-        client.trusted = trusted;
-        client.trust_pending = trust_pending;
-        this->clients_.push_back(client);
-        this->rx_accu8266_.emplace_back();
-        if (this->rx_accu8266_.back().capacity() < kTcpAccuCap)
-          this->rx_accu8266_.back().reserve(kTcpAccuCap);
-        this->clients_.back().disconnect_notified = false;
-        ESP_LOGI(TAG, "TCP connect %s:%u client_id=%d trusted=%s",
-                 ipv4_to_cstr_(remote_ipv4, ipbuf, sizeof(ipbuf)), (unsigned)remote_port,
-                 (int)(this->clients_.size() - 1), trust_pending ? "pending" : (trusted ? "yes" : "no"));
         this->record_tcp_client_connected_();
         return;
       }
@@ -1435,140 +1393,31 @@ namespace esphome
       bool preempted = false;
       if (kPreemptSameIP && !trust_pending)
       {
-        const size_t victim = find_oldest_slot_(std::min(allowed_clients, this->clients_.size()),
+        const size_t victim = find_oldest_slot_(limit,
                                                 [&](size_t idx)
                                                 {
                                                   auto &cl = this->clients_[idx];
-                                                  return cl.socket.connected() && cl.remote_ipv4 == remote_ipv4;
+                                                  return this->is_client_slot_connected_(static_cast<int>(idx)) &&
+                                                         cl.remote_ipv4 == remote_ipv4;
                                                 },
                                                 [&](size_t idx)
                                                 { return this->clients_[idx].last_activity; });
         if (victim != SIZE_MAX)
         {
-          // Close victim and install new client; purge its pending requests
-          this->clients_[victim].socket.stop();
-          this->purge_client_(victim, &this->rx_accu8266_);
-          this->clients_[victim].socket = new_client;
-          this->clients_[victim].socket.setNoDelay(true);
-          this->clients_[victim].socket.setTimeout(10);
-          this->clients_[victim].last_activity = millis();
-          this->clients_[victim].disconnect_notified = false;
-          this->clients_[victim].remote_ipv4 = remote_ipv4;
-          this->clients_[victim].remote_port = remote_port;
-          this->clients_[victim].trusted = trusted;
-          this->clients_[victim].trust_pending = false;
-          INC(g_preempt_events);
+          this->install_client_(victim, new_client, remote_ipv4, remote_port, trusted, false);
+          ++g_preempt_events;
           this->record_tcp_client_connected_();
           preempted = true;
         }
       }
       if (!preempted)
       {
-        INC(g_noslot_events);
+        ++g_noslot_events;
+#ifdef USE_ESP8266
         new_client.stop();
-      }
 #else
-      (void)allowed_clients;
+        close(new_client);
 #endif
-    }
-
-    void ModbusBridgeComponent::handle_new_client_esp32_(size_t allowed_clients)
-    {
-#if defined(USE_ESP32)
-      struct sockaddr_in client_addr;
-      socklen_t addr_len = sizeof(client_addr);
-      int newfd = accept(this->sock_, (struct sockaddr *)&client_addr, &addr_len);
-      if (newfd < 0)
-        return;
-
-      const uint32_t remote_ipv4 = ntohl(client_addr.sin_addr.s_addr);
-      const uint16_t remote_port = ntohs(client_addr.sin_port);
-      const bool trusted = !this->has_trust_rules_() || this->is_trusted_client_ipv4_(remote_ipv4);
-      const bool trust_pending = !trusted && this->trusted_hosts_resolving_;
-      char client_ip[INET_ADDRSTRLEN];
-      inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-      if (this->debug_)
-        ESP_LOGD(TAG, "TCP accept %s:%d", client_ip, remote_port);
-      if (this->is_reject_untrusted_clients_effective_() && !trusted && !trust_pending)
-      {
-        g_reject_untrusted_clients++;
-        ESP_LOGW(TAG, "Rejecting untrusted TCP client %s:%u", client_ip, (unsigned) remote_port);
-        close(newfd);
-        return;
-      }
-
-      configure_tcp_client_socket_(newfd);
-      const size_t duplicate_idx = find_first_slot_(this->clients_.size(), [&](size_t idx)
-      {
-        auto &c = this->clients_[idx];
-        return c.fd >= 0 && c.remote_ipv4 == remote_ipv4 && c.remote_port == remote_port;
-      });
-      if (duplicate_idx != SIZE_MAX)
-      {
-        auto &c = this->clients_[duplicate_idx];
-        this->purge_client_(duplicate_idx, &this->rx_accu_);
-        close(c.fd);
-        c.fd = newfd;
-        c.last_activity = millis();
-        c.remote_ipv4 = remote_ipv4;
-        c.remote_port = remote_port;
-        c.trusted = trusted;
-        c.trust_pending = trust_pending;
-        this->refresh_tcp_client_count_();
-        return;
-      }
-
-      const size_t free_idx = find_first_slot_(allowed_clients, [&](size_t idx)
-      {
-        return this->clients_[idx].fd < 0;
-      });
-      if (free_idx != SIZE_MAX)
-      {
-        auto &c = this->clients_[free_idx];
-        // Keep slot reuse safe even if a previous close path left stale state.
-        this->purge_client_(free_idx, &this->rx_accu_);
-        c.fd = newfd;
-        c.last_activity = millis();
-        c.remote_ipv4 = remote_ipv4;
-        c.remote_port = remote_port;
-        c.trusted = trusted;
-        c.trust_pending = trust_pending;
-        ESP_LOGI(TAG, "TCP connect %s:%u client_id=%zu trusted=%s", client_ip, (unsigned)remote_port, free_idx,
-                 trust_pending ? "pending" : (trusted ? "yes" : "no"));
-        this->record_tcp_client_connected_();
-        return;
-      }
-
-      bool preempted = false;
-      if (kPreemptSameIP && !trust_pending)
-      {
-        const size_t victim = find_oldest_slot_(allowed_clients,
-                                                [&](size_t idx)
-                                                {
-                                                  auto &c = this->clients_[idx];
-                                                  return c.fd >= 0 && c.remote_ipv4 == remote_ipv4;
-                                                },
-                                                [&](size_t idx)
-                                                { return this->clients_[idx].last_activity; });
-        if (victim != SIZE_MAX)
-        {
-          this->purge_client_(victim, &this->rx_accu_);
-          close(this->clients_[victim].fd);
-          this->clients_[victim].fd = newfd;
-          this->clients_[victim].last_activity = millis();
-          this->clients_[victim].remote_ipv4 = remote_ipv4;
-          this->clients_[victim].remote_port = remote_port;
-          this->clients_[victim].trusted = trusted;
-          this->clients_[victim].trust_pending = false;
-          INC(g_preempt_events);
-          this->record_tcp_client_connected_();
-          preempted = true;
-        }
-      }
-      if (!preempted)
-      {
-        INC(g_noslot_events);
-        close(newfd);
       }
 #else
       (void)allowed_clients;
@@ -1588,16 +1437,14 @@ namespace esphome
     void ModbusBridgeComponent::check_tcp_sockets_esp8266_()
     {
 #if defined(USE_ESP8266)
-      // Per-instance RX accumulator
       if (!this->enabled_)
       {
         return; // Do not accept or process any TCP traffic while disabled
       }
-      this->prepare_rx_accumulator_(this->rx_accu8266_, this->clients_.size(), kTcpAccuCap);
       if (this->sock_ < 0)
       {
-        for (auto &v : this->rx_accu8266_)
-          v.clear();
+        for (auto &client : this->clients_)
+          client.rx_buffer.clear();
         return;
       }
       const size_t allowed_clients = this->tcp_allowed_clients_;
@@ -1605,7 +1452,7 @@ namespace esphome
       const auto poll_valid = [this, server_socket, allowed_clients]() {
         return this->enabled_ && this->sock_ == server_socket && this->tcp_allowed_clients_ == allowed_clients;
       };
-      this->handle_new_client_esp8266_(allowed_clients);
+      this->handle_new_client_(allowed_clients);
       if (!poll_valid())
         return;
 
@@ -1614,10 +1461,7 @@ namespace esphome
         const size_t idx = static_cast<size_t>(std::distance(this->clients_.begin(), it));
         if (idx >= allowed_clients)
         {
-          it->socket.stop();
-          it->disconnect_notified = true;
-          this->purge_client_(idx, &this->rx_accu8266_);
-          this->refresh_tcp_client_count_();
+          this->close_client_(idx);
           if (!poll_valid())
             return;
           ++it;
@@ -1629,13 +1473,10 @@ namespace esphome
           if (!it->disconnect_notified)
           {
             ESP_LOGI(TAG, "TCP disconnect client_id=%u", (unsigned)idx);
-            it->disconnect_notified = true;
+            this->close_client_(idx);
+            if (!poll_valid())
+              return;
           }
-          it->socket.stop();
-          this->purge_client_(idx, &this->rx_accu8266_);
-          this->refresh_tcp_client_count_();
-          if (!poll_valid())
-            return;
           ++it;
           continue;
         }
@@ -1643,10 +1484,7 @@ namespace esphome
         if (millis() - it->last_activity > this->tcp_client_timeout_ms_)
         {
           ESP_LOGW(TAG, "TCP timeout client_id=%u", (unsigned)idx);
-          it->socket.stop();
-          it->disconnect_notified = true;
-          this->purge_client_(idx, &this->rx_accu8266_);
-          this->refresh_tcp_client_count_();
+          this->close_client_(idx);
           if (!poll_valid())
             return;
           ++it;
@@ -1656,15 +1494,13 @@ namespace esphome
         const size_t client_fd = static_cast<size_t>(std::distance(this->clients_.begin(), it));
         if (it->trust_pending && it->socket.available() > 0)
         {
-          auto &accu = this->rx_accu8266_[client_fd];
+          auto &accu = this->clients_[client_fd].rx_buffer;
           const size_t room = kTcpAccuCap - accu.size();
           const int received = it->socket.read(this->temp_buffer_.data(), std::min(this->temp_buffer_.size(), room + 1));
           if (received > 0 && static_cast<size_t>(received) > room)
           {
             ESP_LOGW(TAG, "TCP trust-pending buffer full client_id=%u", (unsigned)client_fd);
-            it->socket.stop();
-            this->purge_client_(client_fd, &this->rx_accu8266_);
-            this->refresh_tcp_client_count_();
+            this->close_client_(client_fd);
             if (!poll_valid())
               return;
             ++it;
@@ -1684,7 +1520,7 @@ namespace esphome
           ++it;
           continue;
         }
-        auto &accu = this->rx_accu8266_[client_fd];
+        auto &accu = this->clients_[client_fd].rx_buffer;
         const size_t room = accu.size() < kTcpAccuCap ? kTcpAccuCap - accu.size() : 0;
         const size_t to_read = std::min({static_cast<size_t>(it->socket.available()), this->temp_buffer_.size(), room});
         const int r = to_read > 0 ? it->socket.read(this->temp_buffer_.data(), to_read) : 0;
@@ -1707,15 +1543,14 @@ namespace esphome
     void ModbusBridgeComponent::check_tcp_sockets_esp32_()
     {
 #if defined(USE_ESP32)
-      // Per-instance RX accumulator
       if (!this->enabled_)
       {
         return; // Skip accept/read logic while disabled
       }
       if (this->sock_ < 0)
       {
-        for (auto &v : this->rx_accu_)
-          v.clear();
+        for (auto &client : this->clients_)
+          client.rx_buffer.clear();
         return; // keep accepting/reading even when requests are pending
       }
 
@@ -1726,7 +1561,6 @@ namespace esphome
       };
       if (this->clients_.size() < allowed_clients)
         this->clients_.resize(allowed_clients);
-      this->prepare_rx_accumulator_(this->rx_accu_, this->clients_.size(), kTcpAccuCap);
 
       fd_set read_fds;
       FD_ZERO(&read_fds);
@@ -1742,10 +1576,7 @@ namespace esphome
         {
           if (c.fd >= 0)
           { // over the configured limit → close
-            this->purge_client_(idx, &this->rx_accu_);
-            close(c.fd);
-            c.fd = -1;
-            this->refresh_tcp_client_count_();
+            this->close_client_(idx);
             if (!poll_valid())
               return;
           }
@@ -1756,10 +1587,7 @@ namespace esphome
           if (now - c.last_activity > this->tcp_client_timeout_ms_)
           {
             ESP_LOGW(TAG, "TCP timeout client_id=%zu", idx);
-            this->purge_client_(idx, &this->rx_accu_);
-            close(c.fd);
-            c.fd = -1;
-            this->refresh_tcp_client_count_();
+            this->close_client_(idx);
             if (!poll_valid())
               return;
             continue;
@@ -1767,7 +1595,7 @@ namespace esphome
           if (c.trust_pending)
           {
             // Buffer without dispatching so EOF remains visible even after the peer sent data.
-            auto &accu = this->rx_accu_[idx];
+            auto &accu = this->clients_[idx].rx_buffer;
             const size_t room = kTcpAccuCap - accu.size();
             const int received = recv(c.fd, this->temp_buffer_.data(), std::min(this->temp_buffer_.size(), room + 1), 0);
             const bool overflow = received > 0 && static_cast<size_t>(received) > room;
@@ -1778,10 +1606,7 @@ namespace esphome
                 ESP_LOGW(TAG, "TCP trust-pending buffer full client_id=%zu", idx);
               else
                 ESP_LOGI(TAG, "TCP disconnect while trust pending client_id=%zu", idx);
-              this->purge_client_(idx, &this->rx_accu_);
-              close(c.fd);
-              c.fd = -1;
-              this->refresh_tcp_client_count_();
+              this->close_client_(idx);
               if (!poll_valid())
                 return;
               continue;
@@ -1810,7 +1635,7 @@ namespace esphome
         return;
 
       if (FD_ISSET(this->sock_, &read_fds))
-        this->handle_new_client_esp32_(allowed_clients);
+        this->handle_new_client_(allowed_clients);
       if (!poll_valid())
         return;
 
@@ -1819,7 +1644,7 @@ namespace esphome
         auto &c = this->clients_[i];
         if (c.fd < 0 || c.trust_pending)
           continue;
-        auto &accu = this->rx_accu_[i];
+        auto &accu = this->clients_[i].rx_buffer;
         const size_t room = accu.size() < kTcpAccuCap ? kTcpAccuCap - accu.size() : 0;
         int r = 0;
         if (FD_ISSET(c.fd, &read_fds) && room > 0)
@@ -1828,10 +1653,7 @@ namespace esphome
           if (r == 0)
           {
             ESP_LOGI(TAG, "TCP disconnect client_id=%zu", i);
-            this->purge_client_(i, &this->rx_accu_);
-            close(c.fd);
-            c.fd = -1;
-            this->refresh_tcp_client_count_();
+            this->close_client_(i);
             if (!poll_valid())
               return;
             continue;
@@ -1841,10 +1663,7 @@ namespace esphome
             if (errno != EWOULDBLOCK && errno != EAGAIN)
             {
               ESP_LOGW(TAG, "TCP error client_id=%zu err=%s", i, strerror(errno));
-              this->purge_client_(i, &this->rx_accu_);
-              close(c.fd);
-              c.fd = -1;
-              this->refresh_tcp_client_count_();
+              this->close_client_(i);
               if (!poll_valid())
                 return;
               continue;
@@ -1917,9 +1736,8 @@ namespace esphome
                  to_hex(req.rtu_data).c_str(), req.client_fd, transaction_id_from_header_(req.header));
       }
 
-      uint8_t fc = pdu_fc_from_rtu_(req.rtu_data);
-      uint16_t addr = start_addr_from_rtu_(req.rtu_data);
-      this->rtu_send_cb_.call((int)fc, (int)addr);
+      if (this->rtu_send_cb_.size() != 0)
+        this->rtu_send_cb_.call(pdu_fc_from_rtu_(req.rtu_data), start_addr_from_rtu_(req.rtu_data));
       return true;
     }
 
@@ -2051,9 +1869,8 @@ namespace esphome
       if (this->debug_)
         ESP_LOGD(TAG, "RTU send (hub): %s client_id=%d tid=0x%04X",
                  to_hex(req.rtu_data).c_str(), req.client_fd, transaction_id_from_header_(req.header));
-      const int fc = pdu_fc_from_rtu_(req.rtu_data);
-      const int addr = start_addr_from_rtu_(req.rtu_data);
-      this->rtu_send_cb_.call(fc, addr);
+      if (this->rtu_send_cb_.size() != 0)
+        this->rtu_send_cb_.call(pdu_fc_from_rtu_(req.rtu_data), start_addr_from_rtu_(req.rtu_data));
     }
 
     void ModbusBridgeComponent::on_response(std::span<const uint8_t> request_pdu, std::span<const uint8_t> response_pdu)
@@ -2069,7 +1886,7 @@ namespace esphome
       if (response_pdu.size() > MODBUS_TCP_LEN_CAP - 1 ||
           !response_pdu_matches_request_(req, response_pdu.data(), response_pdu.size()))
       {
-        INC(g_drops_rtu_mismatch);
+        ++g_drops_rtu_mismatch;
         ESP_LOGW(TAG, "Modbus hub response does not match request. Dropping. client_id=%d tid=0x%04X",
                  req.client_fd, transaction_id_from_header_(req.header));
       }
@@ -2091,7 +1908,7 @@ namespace esphome
       if (this->hub_request_matches_(request_pdu))
       {
         const auto &req = this->pending_requests_.front();
-        INC(g_timeouts);
+        ++g_timeouts;
         ESP_LOGW(TAG, "Modbus hub timeout: no valid response. client_id=%d tid=0x%04X",
                  req.client_fd, transaction_id_from_header_(req.header));
         this->fire_rtu_timeout_for_request_(req);
@@ -2114,8 +1931,10 @@ namespace esphome
     void ModbusBridgeComponent::forward_response_(uint8_t uid, const uint8_t *pdu, size_t pdu_len)
     {
       const auto &pending = this->pending_requests_.front();
-      const int fc = pdu_fc_from_rtu_(pending.rtu_data);
-      const int addr = start_addr_from_rtu_(pending.rtu_data);
+      // A TCP send failure can trigger automations that clear the request queue.
+      const bool notify_receive = this->rtu_receive_cb_.size() != 0;
+      const int fc = notify_receive ? pdu_fc_from_rtu_(pending.rtu_data) : 0;
+      const int addr = notify_receive ? start_addr_from_rtu_(pending.rtu_data) : 0;
       const uint16_t tid = transaction_id_from_header_(pending.header);
       const uint32_t elapsed = millis() - pending.start_time;
       if (this->is_client_slot_connected_(pending.client_fd))
@@ -2124,7 +1943,7 @@ namespace esphome
         build_tcp_response_(pending, uid, pdu, pdu_len, tcp_response);
         if (this->send_to_client_(pending.client_fd, tcp_response.data(), tcp_response.size()))
         {
-          INC(g_frames_out);
+          ++g_frames_out;
           if (this->debug_)
             ESP_LOGD(TAG, "RTU->TCP TID: 0x%04X, LEN: %u, Response time: %ums",
                      tid, static_cast<unsigned>(pdu_len + 1), static_cast<unsigned>(elapsed));
@@ -2132,14 +1951,14 @@ namespace esphome
       }
       else if (this->debug_)
         ESP_LOGD(TAG, "Discarding RTU response for disconnected client, TID: 0x%04X", tid);
-      this->rtu_receive_cb_.call(fc, addr);
+      if (notify_receive)
+        this->rtu_receive_cb_.call(fc, addr);
     }
 
     void ModbusBridgeComponent::fire_rtu_timeout_for_request_(const PendingRequest &req)
     {
-      uint8_t fc = pdu_fc_from_rtu_(req.rtu_data);
-      uint16_t addr = start_addr_from_rtu_(req.rtu_data);
-      this->rtu_timeout_cb_.call((int)fc, (int)addr);
+      if (this->rtu_timeout_cb_.size() != 0)
+        this->rtu_timeout_cb_.call(pdu_fc_from_rtu_(req.rtu_data), start_addr_from_rtu_(req.rtu_data));
     }
 
     void ModbusBridgeComponent::check_rtu_timeout_(const PendingRequest &req)
@@ -2228,7 +2047,7 @@ namespace esphome
       const size_t discarded = this->read_uart_response_bytes_(pending);
       if (discarded > 0)
       {
-        INC(g_drops_rtu_incomplete);
+        ++g_drops_rtu_incomplete;
         ESP_LOGW(TAG,
                  "RTU response exceeded capture limit (%u bytes, at least %u discarded). Dropping. client_id=%d bytes=%s",
                  (unsigned)kMaxRtuCapture, (unsigned)discarded, pending.client_fd,
@@ -2292,7 +2111,7 @@ namespace esphome
         bool crc_valid = complete_known_frame || normalized;
         if (current_size < 5)
         {
-          INC(g_drops_rtu_incomplete);
+          ++g_drops_rtu_incomplete;
           ESP_LOGW(TAG, "Invalid RTU response (<5 bytes) – dropping");
           clear_rtu_response_(pending);
           this->check_rtu_timeout_(pending);
@@ -2302,7 +2121,7 @@ namespace esphome
           crc_valid = this->validate_rtu_crc_(pending.response);
         if (!crc_valid)
         {
-          INC(g_drops_rtu_crc);
+          ++g_drops_rtu_crc;
           ESP_LOGW(TAG, "RTU CRC mismatch. Dropping response. client_id=%d bytes=%s",
                    pending.client_fd, to_hex(pending.response).c_str());
           clear_rtu_response_(pending);
@@ -2311,7 +2130,7 @@ namespace esphome
         }
         if (!complete_known_frame && !normalized && !this->validate_rtu_response_matches_request_(pending))
         {
-          INC(g_drops_rtu_mismatch);
+          ++g_drops_rtu_mismatch;
           ESP_LOGW(TAG, "RTU response does not match request. Dropping response. client_id=%d req_uid=%u req_fc=0x%02X bytes=%s",
                    pending.client_fd,
                    pending.rtu_data.size() > 0 ? (unsigned)pending.rtu_data[0] : 0U,
@@ -2463,10 +2282,6 @@ namespace esphome
       if (!enabled)
       {
         this->shutdown_tcp_and_pending_();
-      }
-      else
-      {
-        // Re-enabling: TCP server will be started again by tcp_server_and_network_check
       }
     }
 
